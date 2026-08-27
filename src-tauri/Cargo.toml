@@ -1,0 +1,79 @@
+[package]
+name = "slickshot"
+version = "0.1.0"
+description = "Multi-platform screenshot capture and annotation"
+authors = ["Tuan Pham"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+# The `_lib` suffix may seem redundant but it is necessary
+# to make the lib name unique and wouldn't conflict with the bin name.
+# This seems to be only an issue on Windows, see https://github.com/rust-lang/cargo/issues/8519
+name = "slickshot_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+# Compiles the native macOS Vision OCR shim (vision_ocr.m); macOS-only.
+[target.'cfg(target_os = "macos")'.build-dependencies]
+cc = "1"
+
+[dev-dependencies]
+# Generates QR codes so `qr::tests` can round-trip them back through rqrr.
+qrcode = { version = "0.14", default-features = false, features = ["image"] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon"] }
+tauri-plugin-opener = "2"
+tauri-plugin-global-shortcut = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-store = "2"
+tauri-plugin-notification = "2"
+tauri-plugin-single-instance = "2"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["time"] }
+xcap = "0.9"
+image = "0.25"
+arboard = { version = "3", features = ["wayland-data-control"] }
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+time = { version = "0.3", features = ["formatting", "local-offset"] }
+dirs = "6"
+reqwest = { version = "0.12", default-features = false, features = ["native-tls", "blocking", "json", "multipart"] }
+rqrr = "0.9"
+# Local language detection: the /m translate fallback (translate.rs) exposes
+# no detected-language field of its own, unlike the primary gtx JSON API.
+whatlang = "0.18"
+# rustls rather than the default native-tls build: keeps S3 uploads off
+# openssl-sys, which needs system dev packages this project otherwise doesn't.
+rust-s3 = { version = "0.35", default-features = false, features = ["sync-rustls-tls"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
+x11rb = { version = "0.14", features = ["randr"] }
+
+# Lets the CLI re-attach to the parent terminal's console on Windows, where
+# `windows_subsystem = "windows"` (main.rs) otherwise leaves stdout/stderr
+# with nowhere to go.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security"] }
+# Native OCR via Windows.Media.Ocr (no external tesseract needed on Windows).
+# `windows` 0.61 is already in the tree via tauri/wry, so this reuses it.
+windows = { version = "0.61", features = ["Foundation", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_Com"] }
+
+
+# Dependencies do the heavy lifting (screen grabs, pixel shuffling), so keep
+# them optimized even in dev builds. Cuts capture latency ~5x in `tauri dev`.
+[profile.dev.package."*"]
+opt-level = 2
+
+# Generic image-crate code (e.g. `imageops` used by `session::composite`) is
+# monomorphized into THIS crate, so it runs at the app's own opt-level; 0 made
+# full-screen composites take most of a second. 1 keeps builds fast and code
+# steppable while fixing that.
+[profile.dev]
+opt-level = 1
