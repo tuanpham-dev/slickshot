@@ -42,7 +42,9 @@ interface DragState {
   measuring?: boolean;
 }
 
-const CROP_BUTTONS_W = 76;
+// Sized for two `size="md"` IconButtons (36px, matching the overlay's
+// confirm/cancel/pin cluster) plus the gap between them.
+const CROP_BUTTONS_W = 84;
 const CROP_BUTTONS_H = 36;
 
 interface TextEdit {
@@ -529,8 +531,28 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
           className="absolute flex items-center gap-1.5"
           style={{ left: cropButtonsLeft, top: cropButtonsTop }}
         >
-          <IconButton label="Cancel crop" icon={<X size={16} />} size="sm" variant="secondary" onClick={cancelCrop} />
-          <IconButton label="Confirm crop" icon={<Check size={16} />} size="sm" variant="primary" onClick={onConfirmCrop} />
+          {/* Same size/variant as the region-capture overlay's confirm/cancel
+           * cluster (`Overlay.tsx`) -- previously these were `size="sm"`
+           * (32px) there vs. `size="md"` (36px) here, so confirming a
+           * rectangular selection looked like two different controls
+           * depending on whether you were in the capture overlay or the
+           * editor's crop tool. */}
+          <IconButton
+            label="Cancel crop"
+            icon={<X size={18} />}
+            size="md"
+            variant="secondary"
+            className="shadow-[var(--shadow-md)]"
+            onClick={cancelCrop}
+          />
+          <IconButton
+            label="Confirm crop"
+            icon={<Check size={18} />}
+            size="md"
+            variant="primary"
+            className="shadow-[var(--shadow-md)]"
+            onClick={onConfirmCrop}
+          />
         </div>
       )}
     </div>

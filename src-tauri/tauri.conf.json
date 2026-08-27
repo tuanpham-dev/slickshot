@@ -16,7 +16,7 @@
         "title": "SlickShot",
         "url": "index.html",
         "width": 480,
-        "height": 520,
+        "height": 640,
         "resizable": false,
         "center": true,
         "visible": false,

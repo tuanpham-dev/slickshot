@@ -35,6 +35,8 @@ import {
 import { rectContains, rectIntersect, type PhysPoint, type PhysRect } from "../lib/geometry";
 import { measurementLabel } from "../lib/color";
 import { ResultTabs, type ResultTab } from "../ui/ResultTabs";
+import { IconButton } from "../ui/IconButton";
+import { HANDLES, pickHandle, resizeRect, type HandleId } from "./resize";
 import {
   COLOR_FORMATS,
   Loupe,
@@ -91,75 +93,15 @@ interface TranslatePopoverState {
   detectedLang: string | null;
 }
 
-type HandleId = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
 /** `null` = idle/hovering; "draw" = dragging out a brand new selection from
  * empty space; "move" = dragging the existing selection's body; a HandleId =
  * resizing from that corner/edge. */
 type DragMode = "draw" | "move" | HandleId | null;
 
-const HANDLES: { id: HandleId; xFrac: number; yFrac: number; cursor: string }[] = [
-  { id: "nw", xFrac: 0, yFrac: 0, cursor: "nwse-resize" },
-  { id: "n", xFrac: 0.5, yFrac: 0, cursor: "ns-resize" },
-  { id: "ne", xFrac: 1, yFrac: 0, cursor: "nesw-resize" },
-  { id: "e", xFrac: 1, yFrac: 0.5, cursor: "ew-resize" },
-  { id: "se", xFrac: 1, yFrac: 1, cursor: "nwse-resize" },
-  { id: "s", xFrac: 0.5, yFrac: 1, cursor: "ns-resize" },
-  { id: "sw", xFrac: 0, yFrac: 1, cursor: "nesw-resize" },
-  { id: "w", xFrac: 0, yFrac: 0.5, cursor: "ew-resize" },
-];
-
 const HANDLE_HIT_CSS_PX = 12;
 
 function pct(numerator: number, denominator: number): string {
   return `${(numerator / denominator) * 100}%`;
-}
-
-function handlePhysPositions(rect: PhysRect): { id: HandleId; x: number; y: number }[] {
-  return HANDLES.map(({ id, xFrac, yFrac }) => ({
-    id,
-    x: rect.x + rect.w * xFrac,
-    y: rect.y + rect.h * yFrac,
-  }));
-}
-
-function pickHandle(rect: PhysRect, p: PhysPoint, tolPhys: number): HandleId | null {
-  let best: { id: HandleId; dist: number } | null = null;
-  for (const h of handlePhysPositions(rect)) {
-    const dist = Math.hypot(h.x - p.x, h.y - p.y);
-    if (dist <= tolPhys && (!best || dist < best.dist)) best = { id: h.id, dist };
-  }
-  return best?.id ?? null;
-}
-
-/** Resizes `orig` from the opposite anchor corner/edge, same anchor-point
- * math as the editor's shape resize (`editor/tools/select.ts`). */
-function resizeRect(orig: PhysRect, handle: HandleId, point: PhysPoint): PhysRect {
-  const right = orig.x + orig.w;
-  const bottom = orig.y + orig.h;
-  const isCorner = handle === "nw" || handle === "ne" || handle === "se" || handle === "sw";
-
-  if (isCorner) {
-    const anchorX = handle === "nw" || handle === "sw" ? right : orig.x;
-    const anchorY = handle === "nw" || handle === "ne" ? bottom : orig.y;
-    const newW = Math.max(1, Math.abs(point.x - anchorX));
-    const newH = Math.max(1, Math.abs(point.y - anchorY));
-    const signX = point.x < anchorX ? -1 : 1;
-    const signY = point.y < anchorY ? -1 : 1;
-    const cornerX = anchorX + signX * newW;
-    const cornerY = anchorY + signY * newH;
-    return { x: Math.min(anchorX, cornerX), y: Math.min(anchorY, cornerY), w: newW, h: newH };
-  }
-
-  if (handle === "n" || handle === "s") {
-    const anchorY = handle === "n" ? bottom : orig.y;
-    const newH = Math.max(1, Math.abs(point.y - anchorY));
-    return { x: orig.x, y: Math.min(anchorY, point.y), w: orig.w, h: newH };
-  }
-
-  // "e" | "w"
-  const anchorX = handle === "w" ? right : orig.x;
-  const newW = Math.max(1, Math.abs(point.x - anchorX));
-  return { x: Math.min(anchorX, point.x), y: orig.y, w: newW, h: orig.h };
 }
 
 export function Overlay({ params }: OverlayProps) {
@@ -834,7 +776,12 @@ export function Overlay({ params }: OverlayProps) {
                 HANDLES.map(({ id, xFrac, yFrac, cursor }) => (
                   <div
                     key={id}
-                    className="absolute w-3 h-3 rounded-[3px] bg-white border-2 border-[var(--accent)] shadow-[var(--shadow-sm)]"
+                    // Sharp corners (no rounding) to match the square resize
+                    // handles the editor's crop/select tools draw on canvas
+                    // (`Canvas.tsx`'s `drawHandlesAt`, plain `ctx.rect`) --
+                    // this and the editor previously used different corner
+                    // treatments for the same interaction.
+                    className="absolute w-3 h-3 bg-white border-2 border-[var(--accent)] shadow-[var(--shadow-sm)]"
                     style={{
                       left: pct(sel.left + (sel.right - sel.left) * xFrac, 1),
                       top: pct(sel.top + (sel.bottom - sel.top) * yFrac, 1),
@@ -887,30 +834,37 @@ export function Overlay({ params }: OverlayProps) {
             transform: "translateX(-50%)",
           }}
         >
-          <button
-            type="button"
-            aria-label="Cancel"
+          {/* Shared `IconButton` (same rounded-square shape used by the
+           * editor's crop confirm/cancel and everywhere else in the app)
+           * instead of one-off `rounded-full` buttons -- this cluster used
+           * to be the only place in the app rendering circular buttons,
+           * which read as a different control than the visually-identical
+           * "confirm/cancel a rectangular selection" pair in the editor's
+           * crop tool. */}
+          <IconButton
+            label="Cancel"
+            icon={<X size={18} />}
+            variant="secondary"
+            size="md"
+            className="shadow-[var(--shadow-md)]"
             onClick={() => handleCancel()}
-            className="flex items-center justify-center w-9 h-9 rounded-full bg-[var(--surface)] text-[var(--danger)] border border-[var(--border)] shadow-[var(--shadow-md)] hover:bg-[var(--surface-hover)]"
-          >
-            <X size={18} />
-          </button>
-          <button
-            type="button"
-            aria-label="Pin to screen"
+          />
+          <IconButton
+            label="Pin to screen"
+            icon={<PinIcon size={16} />}
+            variant="secondary"
+            size="md"
+            className="shadow-[var(--shadow-md)]"
             onClick={() => handlePin()}
-            className="flex items-center justify-center w-9 h-9 rounded-full bg-[var(--surface)] text-[var(--fg)] border border-[var(--border)] shadow-[var(--shadow-md)] hover:bg-[var(--surface-hover)]"
-          >
-            <PinIcon size={16} />
-          </button>
-          <button
-            type="button"
-            aria-label="Confirm capture"
+          />
+          <IconButton
+            label="Confirm capture"
+            icon={<Check size={18} />}
+            variant="primary"
+            size="md"
+            className="shadow-[var(--shadow-md)]"
             onClick={() => handleConfirm()}
-            className="flex items-center justify-center w-9 h-9 rounded-full bg-[var(--accent)] text-[var(--accent-fg)] shadow-[var(--shadow-md)] hover:bg-[var(--accent-hover)]"
-          >
-            <Check size={18} />
-          </button>
+          />
         </div>
       )}
 

@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { Popover as RadixPopover } from "radix-ui";
 import {
@@ -187,6 +187,30 @@ export function MainWindow() {
   const [ocrMissingOpen, setOcrMissingOpen] = useState(false);
   const toast = useToast();
 
+  // The window is a fixed, non-resizable size, so on unusually tall content
+  // (large OS font scaling, a long save-folder path wrapping, etc.) the tile
+  // list can still need to scroll to reach "Open image…"/Delay below it --
+  // this fade hints that there's more below instead of the list just
+  // stopping with no affordance. Recomputed on scroll and on content/window
+  // size changes (ResizeObserver), not just once at mount.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [showScrollHint, setShowScrollHint] = useState(false);
+
+  function updateScrollHint() {
+    const el = scrollRef.current;
+    if (!el) return;
+    setShowScrollHint(el.scrollHeight - el.scrollTop - el.clientHeight > 1);
+  }
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (!el) return;
+    updateScrollHint();
+    const observer = new ResizeObserver(updateScrollHint);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+
   function refreshSettings() {
     return getSettings()
       .then((s) => {
@@ -314,82 +338,94 @@ export function MainWindow() {
         </div>
       </div>
 
-      <div className="flex-1 min-h-0 overflow-y-auto px-4 flex flex-col gap-4">
-        <div className="grid grid-cols-2 gap-3">
-          <ModeTile
-            icon={<Camera size={22} />}
-            label="Region"
-            shortcut={shortcutFor("region")}
-            onClick={() => trigger("region")}
-            disabled={busy}
-          />
-          <ModeTile
-            icon={<Maximize size={22} />}
-            label="Screen"
-            shortcut={shortcutFor("screen")}
-            onClick={() => trigger("screen")}
-            disabled={busy}
-          />
-          <ModeTile
-            icon={<AppWindow size={22} />}
-            label="Window"
-            shortcut={shortcutFor("window")}
-            onClick={() => trigger("window")}
-            disabled={busy}
-          />
-          <MonitorTile busy={busy} onPick={(id) => trigger("monitor", id)} />
-          <div className="col-span-2">
+      <div className="relative flex-1 min-h-0">
+        <div
+          ref={scrollRef}
+          onScroll={updateScrollHint}
+          className="h-full overflow-y-auto px-4 flex flex-col gap-4"
+        >
+          <div className="grid grid-cols-2 gap-3">
             <ModeTile
-              compact
-              icon={settings?.translate_enabled ? <Languages size={18} /> : <ScanText size={18} />}
-              label={settings?.translate_enabled ? "Translate/Extract text" : "Extract text"}
-              shortcut={shortcutFor("translate")}
-              onClick={handleTranslateClick}
-              disabled={busy}
-              warning={ocrStatus !== null && !ocrStatus.available}
-            />
-          </div>
-          <ModeTile
-            compact
-            icon={<Repeat size={18} />}
-            label="Repeat region"
-            shortcut={shortcutFor("region_repeat")}
-            onClick={() => trigger("region_repeat")}
-            disabled={busy}
-          />
-          <ModeTile
-            compact
-            icon={<Pipette size={18} />}
-            label="Pick color"
-            shortcut={shortcutFor("color")}
-            onClick={() => trigger("color")}
-            disabled={busy}
-          />
-          <div className="col-span-2">
-            <ModeTile
-              compact
-              icon={<Ruler size={18} />}
-              label="Measure"
-              shortcut={shortcutFor("measure")}
-              onClick={() => trigger("measure")}
+              icon={<Camera size={22} />}
+              label="Region"
+              shortcut={shortcutFor("region")}
+              onClick={() => trigger("region")}
               disabled={busy}
             />
+            <ModeTile
+              icon={<Maximize size={22} />}
+              label="Screen"
+              shortcut={shortcutFor("screen")}
+              onClick={() => trigger("screen")}
+              disabled={busy}
+            />
+            <ModeTile
+              icon={<AppWindow size={22} />}
+              label="Window"
+              shortcut={shortcutFor("window")}
+              onClick={() => trigger("window")}
+              disabled={busy}
+            />
+            <MonitorTile busy={busy} onPick={(id) => trigger("monitor", id)} />
+            <div className="col-span-2">
+              <ModeTile
+                compact
+                icon={settings?.translate_enabled ? <Languages size={18} /> : <ScanText size={18} />}
+                label={settings?.translate_enabled ? "Translate/Extract text" : "Extract text"}
+                shortcut={shortcutFor("translate")}
+                onClick={handleTranslateClick}
+                disabled={busy}
+                warning={ocrStatus !== null && !ocrStatus.available}
+              />
+            </div>
+            <ModeTile
+              compact
+              icon={<Repeat size={18} />}
+              label="Repeat region"
+              shortcut={shortcutFor("region_repeat")}
+              onClick={() => trigger("region_repeat")}
+              disabled={busy}
+            />
+            <ModeTile
+              compact
+              icon={<Pipette size={18} />}
+              label="Pick color"
+              shortcut={shortcutFor("color")}
+              onClick={() => trigger("color")}
+              disabled={busy}
+            />
+            <div className="col-span-2">
+              <ModeTile
+                compact
+                icon={<Ruler size={18} />}
+                label="Measure"
+                shortcut={shortcutFor("measure")}
+                onClick={() => trigger("measure")}
+                disabled={busy}
+              />
+            </div>
+          </div>
+
+          <ModeTile
+            compact
+            icon={<ImageIcon size={18} />}
+            label="Open image…"
+            shortcut="Ctrl+O"
+            onClick={handleOpenImage}
+            disabled={busy}
+          />
+
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-[var(--fg-muted)]">Delay</span>
+            <Segmented aria-label="Capture delay" value={delay} onChange={handleDelayChange} options={DELAY_OPTIONS} />
           </div>
         </div>
-
-        <ModeTile
-          compact
-          icon={<ImageIcon size={18} />}
-          label="Open image…"
-          shortcut="Ctrl+O"
-          onClick={handleOpenImage}
-          disabled={busy}
-        />
-
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-[var(--fg-muted)]">Delay</span>
-          <Segmented aria-label="Capture delay" value={delay} onChange={handleDelayChange} options={DELAY_OPTIONS} />
-        </div>
+        {showScrollHint && (
+          <div
+            aria-hidden
+            className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[var(--bg)] to-transparent"
+          />
+        )}
       </div>
 
       <div className="px-4 pb-4 pt-2">
