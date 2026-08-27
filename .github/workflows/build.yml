@@ -1,0 +1,248 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: Test (typecheck, unit tests, clippy)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # Baseline Tauri Linux deps (libwebkit2gtk/libgtk/libayatana/libssl/
+      # patchelf/build-essential) plus this app's own extras, translated
+      # from the Fedora package list in README.md's Prerequisites section:
+      # pipewire-devel -> libpipewire-0.3-dev (xcap's Linux backend links
+      # PipeWire), clang-devel -> libclang-dev (bindgen, via the PipeWire
+      # bindings), mesa-libgbm-devel -> libgbm-dev (xcap's Wayland/DRM path).
+      - name: Install Linux Tauri build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            patchelf \
+            build-essential \
+            libpipewire-0.3-dev \
+            libclang-dev \
+            libgbm-dev
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # tsc (typecheck) + vite build; there's no separate typecheck script.
+      - name: Typecheck + build frontend
+        run: pnpm build
+
+      # No frontend test files exist yet -- `test` runs with
+      # --passWithNoTests so this stays green until some are added, rather
+      # than failing CI on an empty suite.
+      - name: JS/TS unit tests
+        run: pnpm test
+
+      - name: Rust tests
+        working-directory: src-tauri
+        run: cargo test
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --all-targets -- -D warnings
+
+  platform-check:
+    name: Platform check (${{ matrix.target }})
+    # Compile-only verification for target_os-gated code (monitor geometry,
+    # clipboard, theme sync, CLI console attach -- see docs/TESTING.md's
+    # "Known risk areas") that can never be type-checked on this repo's
+    # Linux dev machine. cargo check/clippy, not a full tauri build, so this
+    # runs on every push/PR rather than only at release time like `build`.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Check
+        working-directory: src-tauri
+        run: cargo check --target ${{ matrix.target }}
+
+      - name: Clippy
+        working-directory: src-tauri
+        run: cargo clippy --target ${{ matrix.target }} --all-targets -- -D warnings
+
+  build:
+    name: Build (${{ matrix.os }})
+    needs: test
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      # Tauri's Linux bundler produces .deb + .rpm + .AppImage together
+      # from one native build -- no separate Fedora runner needed, the .rpm
+      # from this same job is the Fedora-installable package.
+      - name: Install Linux Tauri build dependencies
+        if: startsWith(matrix.os, 'ubuntu-22.04')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libssl-dev \
+            libgtk-3-dev \
+            patchelf \
+            build-essential \
+            libpipewire-0.3-dev \
+            libclang-dev \
+            libgbm-dev
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+          key: ${{ matrix.target }}
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Linux only: tauri-action's underlying `tauri build` is known to
+      # fail (nonzero exit) at the very last AppImage-packaging step even
+      # when the .deb/.rpm it built moments earlier are fine -- see
+      # docs/BUILDING.md. continue-on-error lets the verify/fallback step
+      # below run instead of the job dying here; it's the one that decides
+      # whether this was actually fine or a real failure.
+      - name: Build and publish release (tag push)
+        if: startsWith(github.ref, 'refs/tags/v')
+        id: tauri_release
+        continue-on-error: ${{ startsWith(matrix.os, 'ubuntu-22.04') }}
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SlickShot ${{ github.ref_name }}
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+      - name: Build only (manual dispatch)
+        if: github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/v')
+        id: tauri_dispatch
+        continue-on-error: ${{ startsWith(matrix.os, 'ubuntu-22.04') }}
+        uses: tauri-apps/tauri-action@v0
+        with:
+          args: --target ${{ matrix.target }}
+
+      # See docs/BUILDING.md "AppImage: known build issue and fix" -- the
+      # icon-name mismatch is a Tauri bundler bug, not specific to this
+      # sandbox, so it's expected to reproduce on a clean runner too. Runs
+      # the fallback only if the AppImage is actually missing (a genuinely
+      # clean tauri-action run needs no fix), then hard-fails the job if
+      # .deb/.rpm/.AppImage aren't all present afterward -- so a real
+      # failure (not just this known quirk) still fails CI.
+      - name: Verify Linux bundles (fix AppImage if needed)
+        if: startsWith(matrix.os, 'ubuntu-22.04')
+        run: |
+          BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
+          shopt -s nullglob
+          appimages=("$BUNDLE_DIR"/appimage/*.AppImage)
+          if [ ${#appimages[@]} -eq 0 ]; then
+            echo "No .AppImage found -- running the fallback fix."
+            bash scripts/fix-appimage.sh "${{ matrix.target }}"
+          fi
+
+          debs=("$BUNDLE_DIR"/deb/*.deb)
+          rpms=("$BUNDLE_DIR"/rpm/*.rpm)
+          appimages=("$BUNDLE_DIR"/appimage/*.AppImage)
+          missing=()
+          [ ${#debs[@]} -eq 0 ] && missing+=(".deb")
+          [ ${#rpms[@]} -eq 0 ] && missing+=(".rpm")
+          [ ${#appimages[@]} -eq 0 ] && missing+=(".AppImage")
+          if [ ${#missing[@]} -gt 0 ]; then
+            echo "::error::Missing bundle(s) after build + fallback: ${missing[*]}"
+            exit 1
+          fi
+          echo "All Linux bundles present: ${debs[*]} ${rpms[*]} ${appimages[*]}"
+
+      - name: Upload build artifacts
+        if: github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/v')
+        uses: actions/upload-artifact@v4
+        with:
+          name: slickshot-${{ matrix.target }}
+          path: |
+            src-tauri/target/${{ matrix.target }}/release/bundle/**/*
+          if-no-files-found: error

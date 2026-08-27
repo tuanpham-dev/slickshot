@@ -1,0 +1,10 @@
+# Architecture
+
+[← Back to README](../README.md)
+
+- **Backend (`src-tauri/`):** Rust, screen capture via [`xcap`](https://github.com/nashaofu/xcap) for pixel data. Monitor *geometry* is read directly via `x11rb` RandR on Linux — `xcap`'s own `Monitor::x/y/width/height()` divide by a single global desktop scale factor, which is wrong on setups with per-monitor xrandr `--scale` transforms (mixed-DPI multi-monitor). See `src-tauri/src/capture/xcap_backend.rs` for the full explanation.
+- **Coordinate space:** every rect in Rust (`PhysRect`) is physical pixels in the global virtual-screen space. The frontend never assumes a DPI ratio — it derives the CSS↔physical scale from each window's own reported size, which is correct regardless of platform DPI conventions.
+- **Region/window selection:** on trigger, every monitor is captured once into a `CaptureSession` held in memory; one fullscreen overlay window is opened per monitor showing that frozen frame. Selecting a region composites the crop from the frozen frames — the screen is never re-captured mid-selection.
+- **Editor:** a plain `<canvas>` (not a canvas library) — a base bitmap layer plus an annotation layer, both sized to the image's native resolution; zoom is a CSS transform on the wrapper, not `ctx.scale`, so export stays pixel-exact.
+- **IPC:** capture/annotation frames are served to the webview over a custom `slickshot://` protocol (not base64-encoded through `invoke`); export sends the flattened PNG as a raw binary IPC body via `tauri::ipc::Request`.
+- **CLI (`src-tauri/src/cli.rs`):** the same binary parses `clap` args in `main()` before Tauri boots. Non-interactive commands (`screen`, `monitor`, `ocr`, `qr`, `upload`, `list-monitors`) run to completion in that process with no GUI. Interactive commands (`region`, `window`, `open`) forward to an already-running instance via `tauri-plugin-single-instance`, or cold-start the app; a `CliSink` app-state value tells `selection::selection_confirm_rect` to export straight to the CLI's requested sink instead of opening the editor. See [CLI](CLI.md) for the user-facing surface.
