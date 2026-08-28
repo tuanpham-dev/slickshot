@@ -155,6 +155,14 @@ jobs:
       # Tauri's Linux bundler produces .deb + .rpm + .AppImage together
       # from one native build -- no separate Fedora runner needed, the .rpm
       # from this same job is the Fedora-installable package.
+      #
+      # xdg-utils (for xdg-open): present by default on the x86_64
+      # ubuntu-24.04 runner image but not on ubuntu-24.04-arm's -- GitHub's
+      # newer ARM64 runner images don't yet have full package parity with
+      # the x86_64 ones. Tauri's AppImage bundler shells out to xdg-open
+      # during packaging and fails outright ("xdg-open binary not found")
+      # without it, so it's installed explicitly rather than relying on
+      # whatever happens to already be on the runner.
       - name: Install Linux Tauri build dependencies
         if: startsWith(matrix.os, 'ubuntu-24.04')
         run: |
@@ -169,7 +177,8 @@ jobs:
             build-essential \
             libpipewire-0.3-dev \
             libclang-dev \
-            libgbm-dev
+            libgbm-dev \
+            xdg-utils
 
       - uses: pnpm/action-setup@v4
 
