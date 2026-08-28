@@ -28,6 +28,9 @@ const SHOWS_FONT_SIZE: ToolId[] = ["text"];
 const SHOWS_BLOCK_SIZE: ToolId[] = ["pixelate"];
 const SHOWS_MARKER_SIZE: ToolId[] = ["marker"];
 const SHOWS_SPOTLIGHT_DIM: ToolId[] = ["spotlight"];
+/** Ellipse is deliberately absent -- it has no corners to round. Spotlight
+ * qualifies only in its rect form, which `showRadius` checks separately. */
+const SHOWS_RADIUS: ToolId[] = ["rect", "spotlight"];
 
 const SPOTLIGHT_FORMS: { value: SpotlightForm; label: string }[] = [
   { value: "rect", label: "Rectangle" },
@@ -106,6 +109,21 @@ function SelectedShapeFields({
               }}
             />
           </Field>
+          {/* Rect only -- an ellipse has no corners to round. */}
+          {shape.kind === "rect" && (
+            <Field label="Corner radius">
+              <Slider
+                aria-label="Corner radius"
+                value={shape.radius ?? 0}
+                min={0}
+                max={100}
+                onChange={(radius) => {
+                  onUpdateShape({ ...shape, radius });
+                  onChange({ radius });
+                }}
+              />
+            </Field>
+          )}
         </>
       );
     case "arrow":
@@ -226,6 +244,21 @@ function SelectedShapeFields({
               }}
             />
           </Field>
+          {/* Rect form only -- the ellipse form is already fully round. */}
+          {shape.form === "rect" && (
+            <Field label="Corner radius">
+              <Slider
+                aria-label="Corner radius"
+                value={shape.radius ?? 0}
+                min={0}
+                max={100}
+                onChange={(radius) => {
+                  onUpdateShape({ ...shape, radius });
+                  onChange({ radius });
+                }}
+              />
+            </Field>
+          )}
         </>
       );
     case "image":
@@ -350,6 +383,8 @@ export function PropertiesPanel({
   const showBlock = SHOWS_BLOCK_SIZE.includes(tool);
   const showMarkerSize = SHOWS_MARKER_SIZE.includes(tool);
   const showSpotlightDim = SHOWS_SPOTLIGHT_DIM.includes(tool);
+  const showRadius =
+    SHOWS_RADIUS.includes(tool) && (tool !== "spotlight" || style.spotlightForm === "rect");
 
   if (tool === "measure") {
     return (
@@ -380,6 +415,7 @@ export function PropertiesPanel({
     !showBlock &&
     !showMarkerSize &&
     !showSpotlightDim &&
+    !showRadius &&
     !backdrop.enabled
   ) {
     return (
@@ -442,6 +478,17 @@ export function PropertiesPanel({
             min={1}
             max={20}
             onChange={(strokeWidth) => onChange({ strokeWidth })}
+          />
+        </Field>
+      )}
+      {showRadius && (
+        <Field label="Corner radius">
+          <Slider
+            aria-label="Corner radius"
+            value={style.radius}
+            min={0}
+            max={100}
+            onChange={(radius) => onChange({ radius })}
           />
         </Field>
       )}

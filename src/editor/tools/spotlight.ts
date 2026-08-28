@@ -12,5 +12,6 @@ export function createSpotlight(id: string, start: ImgPoint, current: ImgPoint, 
     h: Math.abs(current.y - start.y),
     dimOpacity: style.spotlightDim,
     form: style.spotlightForm,
+    radius: style.radius,
   };
 }

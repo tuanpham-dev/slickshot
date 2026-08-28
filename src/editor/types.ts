@@ -26,6 +26,10 @@ export interface Style {
   /** 0..1 darkness of the area *outside* spotlight shapes. */
   spotlightDim: number;
   spotlightForm: SpotlightForm;
+  /** Corner radius (image-space px) for new rectangles and rect-form
+   * spotlights. Rendering clamps it to half the shape's smaller side, so a
+   * value larger than the shape can hold just reads as fully rounded. */
+  radius: number;
 }
 
 export interface ImgPoint {
@@ -66,6 +70,9 @@ export interface RectShape extends ShapeBase {
   stroke: string;
   fill: string | null;
   strokeWidth: number;
+  /** Optional so shapes drawn before this existed (and history snapshots
+   * holding them) stay valid; `undefined` renders as square corners. */
+  radius?: number;
 }
 
 export interface EllipseShape extends ShapeBase {
@@ -158,6 +165,9 @@ export interface SpotlightShape extends ShapeBase {
   h: number;
   dimOpacity: number;
   form: SpotlightForm;
+  /** Corner radius of the punched-out hole. Only meaningful for
+   * `form: "rect"` -- the ellipse form is already fully round. */
+  radius?: number;
 }
 
 export interface ImageShape extends ShapeBase {

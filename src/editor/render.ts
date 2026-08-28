@@ -51,6 +51,42 @@ export async function preloadImageShapes(shapes: Shape[]): Promise<void> {
   await Promise.all(pending);
 }
 
+/** Begins a rounded-rect path, clamping the radius to half the smaller side
+ * so an over-large radius reads as "fully rounded" instead of letting the
+ * corner arcs cross each other. Negative `w`/`h` (a shape stored from a
+ * right-to-left drag) are normalized first.
+ *
+ * `ctx.roundRect` needs WebKitGTK >= 2.38; the manual `arcTo` path is an
+ * equivalent fallback for older webviews. */
+function roundedRectPath(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  radius: number,
+) {
+  const left = w < 0 ? x + w : x;
+  const top = h < 0 ? y + h : y;
+  const width = Math.abs(w);
+  const height = Math.abs(h);
+  const r = Math.max(0, Math.min(radius, width / 2, height / 2));
+
+  ctx.beginPath();
+  if (typeof ctx.roundRect === "function") {
+    ctx.roundRect(left, top, width, height, r);
+    return;
+  }
+  const right = left + width;
+  const bottom = top + height;
+  ctx.moveTo(left + r, top);
+  ctx.arcTo(right, top, right, bottom, r);
+  ctx.arcTo(right, bottom, left, bottom, r);
+  ctx.arcTo(left, bottom, left, top, r);
+  ctx.arcTo(left, top, right, top, r);
+  ctx.closePath();
+}
+
 /** Paints the single shared dim layer for every spotlight shape: fill the
  * whole canvas, then punch each spotlight's rect back out with
  * `destination-out`. Built on its own canvas because the punch-through has
@@ -73,6 +109,9 @@ function drawSpotlightLayer(ctx: CanvasRenderingContext2D, spotlights: Spotlight
     if (s.form === "ellipse") {
       lctx.beginPath();
       lctx.ellipse(s.x + s.w / 2, s.y + s.h / 2, Math.abs(s.w) / 2, Math.abs(s.h) / 2, 0, 0, Math.PI * 2);
+      lctx.fill();
+    } else if ((s.radius ?? 0) > 0) {
+      roundedRectPath(lctx, s.x, s.y, s.w, s.h, s.radius!);
       lctx.fill();
     } else {
       lctx.fillRect(s.x, s.y, s.w, s.h);
@@ -97,6 +136,17 @@ function drawShape(ctx: CanvasRenderingContext2D, s: Shape, opts: RenderOptions)
     case "rect": {
       ctx.lineWidth = s.strokeWidth;
       ctx.strokeStyle = s.stroke;
+      if ((s.radius ?? 0) > 0) {
+        // One path, filled then stroked -- rebuilding it between the two
+        // would double the arc math for no gain.
+        roundedRectPath(ctx, s.x, s.y, s.w, s.h, s.radius!);
+        if (s.fill) {
+          ctx.fillStyle = s.fill;
+          ctx.fill();
+        }
+        ctx.stroke();
+        break;
+      }
       if (s.fill) {
         ctx.fillStyle = s.fill;
         ctx.fillRect(s.x, s.y, s.w, s.h);

@@ -25,6 +25,7 @@ import {
   pinEditorImage,
   copyTextToClipboard,
   loadImageFile,
+  openImageFile,
   readClipboardImage,
   releaseImage,
   ISO_TO_OCR_LANG,
@@ -126,6 +127,7 @@ export function Editor({ params }: EditorProps) {
   } | null>(null);
   const [exporting, setExporting] = useState(false);
   const [closeGuardOpen, setCloseGuardOpen] = useState(false);
+  const [openGuardOpen, setOpenGuardOpen] = useState(false);
   const [ocrPopover, setOcrPopover] = useState<OcrPopoverState | null>(null);
   const [colorPopover, setColorPopover] = useState<{ screenX: number; screenY: number; rgb: Rgb } | null>(null);
   // Sticky across repeated OCR extractions in the same editor session: once
@@ -298,6 +300,11 @@ export function Editor({ params }: EditorProps) {
         doPin();
         return;
       }
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        handleOpenImage();
+        return;
+      }
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "v") {
         // Handled here rather than through a `paste` listener: WebKitGTK
         // only fires paste events at an editable target, so pasting onto
@@ -374,6 +381,7 @@ export function Editor({ params }: EditorProps) {
     doUpload,
     doPin,
     handleToolChange,
+    handleOpenImage,
   ]);
 
   // Probed once each time the "Extract text" tool is (re-)activated (button
@@ -677,6 +685,34 @@ export function Editor({ params }: EditorProps) {
     }
   }
 
+  /** Swaps the whole editing session over to another image file. Goes through
+   * `open_image_file`, which stores the decoded image and re-emits
+   * `editor:image` at this same pre-warmed window -- the existing
+   * `onEditorImage` listener then repaints and `setImage` clears shapes,
+   * history and the dirty flag, so this needs no teardown of its own. */
+  async function openAnotherImage() {
+    const path = await openDialog({
+      multiple: false,
+      filters: [{ name: "Images", extensions: ["png", "jpg", "jpeg", "gif", "webp", "bmp"] }],
+    });
+    if (typeof path !== "string") return;
+    try {
+      await openImageFile(path);
+    } catch (err) {
+      toast.show({ kind: "error", title: "Couldn't open image", description: String(err) });
+    }
+  }
+
+  function handleOpenImage() {
+    // Same guard as closing: replacing the image discards every annotation,
+    // so unsaved work gets a confirmation first.
+    if (useEditorStore.getState().dirty) {
+      setOpenGuardOpen(true);
+      return;
+    }
+    openAnotherImage();
+  }
+
   async function handleInsertImage() {
     const path = await openDialog({
       multiple: false,
@@ -818,6 +854,18 @@ export function Editor({ params }: EditorProps) {
           }}
         />
         <div className="flex items-center gap-1 pr-2">
+          {/* Grouped with the export actions rather than the toolbar: this
+              swaps the whole document, so it belongs with the other
+              session-level I/O (Pin, Copy/Save/Upload), not with the
+              annotation tools. `Insert image` stays in the toolbar since it
+              adds a shape to the current document instead of replacing it. */}
+          <IconButton
+            label="Open image…"
+            shortcut="Ctrl+O"
+            icon={<FolderOpen size={16} />}
+            onClick={handleOpenImage}
+          />
+          <div className="w-px h-5 bg-[var(--border)] mx-1" />
           {/* Wrapped in a span, not passed straight to Tooltip: the trigger
               clones its child and hands it a ref, which `Select` (a plain
               function component) can't receive. */}
@@ -1092,6 +1140,16 @@ export function Editor({ params }: EditorProps) {
           useEditorStore.setState({ dirty: false });
           editorHide();
         }}
+      />
+
+      <ConfirmDialog
+        open={openGuardOpen}
+        onOpenChange={setOpenGuardOpen}
+        title="Discard changes?"
+        description="Opening another image will discard your annotations."
+        confirmLabel="Discard"
+        danger
+        onConfirm={openAnotherImage}
       />
     </div>
   );

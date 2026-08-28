@@ -21,5 +21,6 @@ export function createRect(
     stroke: style.stroke,
     fill: style.fill,
     strokeWidth: style.strokeWidth,
+    radius: style.radius,
   };
 }

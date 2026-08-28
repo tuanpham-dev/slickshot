@@ -101,7 +101,6 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     removeShape,
     select,
     setTool,
-    nextMarkerNumber,
     setCropRect,
     setOcrRect,
     setMeasureLine,
@@ -253,7 +252,10 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     }
 
     if (tool === "marker") {
-      addShape(createMarker(crypto.randomUUID(), p, nextMarkerNumber(), style));
+      // Provisional number; `addShape` re-derives it from position so the
+      // sequence stays 1..n after deletions.
+      const nextNumber = shapes.filter((s) => s.kind === "marker").length + 1;
+      addShape(createMarker(crypto.randomUUID(), p, nextNumber, style));
       return;
     }
 

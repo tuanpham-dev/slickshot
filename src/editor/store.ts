@@ -2,6 +2,7 @@ import { create } from "zustand";
 import type { PhysRect } from "../lib/geometry";
 import type { Backdrop, MeasureLine, Shape, Style, ToolId } from "./types";
 import { cloneShape, moveShape } from "./tools/select";
+import { renumberMarkers } from "./tools/marker";
 
 /** One undo step. Backdrop rides along with the shapes so toggling or
  * restyling the frame is undoable like any other edit. */
@@ -29,7 +30,6 @@ interface EditorState {
   ocrRect: PhysRect | null;
   measureLine: MeasureLine | null;
   dirty: boolean;
-  markerCounter: number;
 
   setImage: (id: string, width: number, height: number) => void;
   setTool: (tool: ToolId) => void;
@@ -55,7 +55,6 @@ interface EditorState {
   applyCrop: (rect: PhysRect) => void;
   setOcrRect: (rect: PhysRect | null) => void;
   setMeasureLine: (line: MeasureLine | null) => void;
-  nextMarkerNumber: () => number;
 }
 
 const DEFAULT_STYLE: Style = {
@@ -68,6 +67,7 @@ const DEFAULT_STYLE: Style = {
   markerSize: 14,
   spotlightDim: 0.6,
   spotlightForm: "rect",
+  radius: 0,
 };
 
 const DEFAULT_BACKDROP: Backdrop = {
@@ -100,7 +100,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   ocrRect: null,
   measureLine: null,
   dirty: false,
-  markerCounter: 0,
 
   // Resets all editing state along with the image: the editor window is
   // pre-warmed and reused across captures (see `editor::show` in Rust), so
@@ -120,7 +119,6 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ocrRect: null,
       measureLine: null,
       dirty: false,
-      markerCounter: 0,
       backdrop: DEFAULT_BACKDROP,
     }),
   setTool: (tool) =>
@@ -151,9 +149,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
     set({ draft: null });
   },
 
+  // Renumbering runs on add as well as remove so a marker inserted after a
+  // deletion (or a duplicated one, which arrives here via `duplicateSelected`
+  // carrying a copy of its source's number) lands on the next free number
+  // rather than repeating one.
   addShape: (shape) =>
     set((s) => ({
-      shapes: [...s.shapes, shape],
+      shapes: renumberMarkers([...s.shapes, shape]),
       past: [...s.past, snapshot(s)],
       future: [],
       dirty: true,
@@ -168,7 +170,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
 
   removeShape: (id) =>
     set((s) => ({
-      shapes: s.shapes.filter((sh) => sh.id !== id),
+      shapes: renumberMarkers(s.shapes.filter((sh) => sh.id !== id)),
       past: [...s.past, snapshot(s)],
       future: [],
       selectedId: null,
@@ -240,10 +242,4 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   setOcrRect: (rect) => set({ ocrRect: rect }),
 
   setMeasureLine: (line) => set({ measureLine: line }),
-
-  nextMarkerNumber: () => {
-    const n = get().markerCounter + 1;
-    set({ markerCounter: n });
-    return n;
-  },
 }));
