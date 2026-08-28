@@ -77,3 +77,7 @@ opt-level = 2
 # steppable while fixing that.
 [profile.dev]
 opt-level = 1
+# Full debuginfo put the dev binary near 700MB and the target dir into tens of
+# gigabytes. Line tables keep backtraces and panic locations accurate; only
+# variable-level inspection under a step debugger is lost.
+debug = "line-tables-only"
