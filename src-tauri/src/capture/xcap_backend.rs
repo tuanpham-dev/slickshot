@@ -59,30 +59,7 @@ impl ScreenCapturer for XcapCapturer {
     }
 
     fn windows(&self) -> CaptureResult<Vec<WindowInfo>> {
-        let windows =
-            xcap::Window::all().map_err(|e| CaptureError::Backend(e.to_string()))?;
-
-        let mut out = Vec::new();
-        for w in windows {
-            let is_minimized = w.is_minimized().unwrap_or(false);
-            let width = w.width().unwrap_or(0);
-            let height = w.height().unwrap_or(0);
-            if is_minimized || width == 0 || height == 0 {
-                continue;
-            }
-            out.push(WindowInfo {
-                id: w.id().map_err(|e| CaptureError::Backend(e.to_string()))?,
-                title: w.title().unwrap_or_default(),
-                app_name: w.app_name().unwrap_or_default(),
-                rect: PhysRect::new(
-                    w.x().unwrap_or(0),
-                    w.y().unwrap_or(0),
-                    width,
-                    height,
-                ),
-            });
-        }
-        Ok(out)
+        platform::windows()
     }
 
     fn capture_window(&self, id: u32) -> CaptureResult<RgbaImage> {
@@ -96,6 +73,32 @@ impl ScreenCapturer for XcapCapturer {
             .capture_image()
             .map_err(|e| CaptureError::Backend(e.to_string()))
     }
+}
+
+/// Shared by platforms where `xcap`'s window `x/y/width/height()` already
+/// report physical pixels in the global virtual-screen space (Linux X11,
+/// Windows) -- see the macOS module below for the platform that needs a
+/// unit conversion instead of a passthrough.
+#[cfg(not(target_os = "macos"))]
+fn generic_windows() -> CaptureResult<Vec<WindowInfo>> {
+    let windows = xcap::Window::all().map_err(|e| CaptureError::Backend(e.to_string()))?;
+
+    let mut out = Vec::new();
+    for w in windows {
+        let is_minimized = w.is_minimized().unwrap_or(false);
+        let width = w.width().unwrap_or(0);
+        let height = w.height().unwrap_or(0);
+        if is_minimized || width == 0 || height == 0 {
+            continue;
+        }
+        out.push(WindowInfo {
+            id: w.id().map_err(|e| CaptureError::Backend(e.to_string()))?,
+            title: w.title().unwrap_or_default(),
+            app_name: w.app_name().unwrap_or_default(),
+            rect: PhysRect::new(w.x().unwrap_or(0), w.y().unwrap_or(0), width, height),
+        });
+    }
+    Ok(out)
 }
 
 /// Monitor geometry sourced directly from X11 RandR, bypassing `xcap`'s
@@ -149,6 +152,10 @@ mod linux {
         }
         Ok(out)
     }
+
+    pub fn windows() -> CaptureResult<Vec<WindowInfo>> {
+        super::generic_windows()
+    }
 }
 
 /// Windows' `DEVMODEW`-derived geometry (what `xcap`'s own getters read, via
@@ -182,6 +189,10 @@ mod windows {
                 })
             })
             .collect()
+    }
+
+    pub fn windows() -> CaptureResult<Vec<WindowInfo>> {
+        super::generic_windows()
     }
 }
 
@@ -227,6 +238,45 @@ mod macos {
                 })
             })
             .collect()
+    }
+
+    /// Same points-vs-pixels mismatch as `monitors()` above, since window
+    /// bounds (`kCGWindowBounds`, read via `CGWindowListCopyWindowInfo`) come
+    /// from the same Core Graphics global display space as `CGDisplayBounds`.
+    /// Scaled by the window's own `current_monitor()` rather than a single
+    /// display's factor, so this stays correct if a window sits on a
+    /// non-primary display with a different scale factor in a mixed-DPI
+    /// multi-monitor setup.
+    pub fn windows() -> CaptureResult<Vec<WindowInfo>> {
+        let windows = xcap::Window::all().map_err(|e| CaptureError::Backend(e.to_string()))?;
+
+        let mut out = Vec::new();
+        for w in windows {
+            let is_minimized = w.is_minimized().unwrap_or(false);
+            let width = w.width().unwrap_or(0);
+            let height = w.height().unwrap_or(0);
+            if is_minimized || width == 0 || height == 0 {
+                continue;
+            }
+            let scale = w
+                .current_monitor()
+                .ok()
+                .and_then(|m| m.scale_factor().ok())
+                .unwrap_or(1.0);
+
+            out.push(WindowInfo {
+                id: w.id().map_err(|e| CaptureError::Backend(e.to_string()))?,
+                title: w.title().unwrap_or_default(),
+                app_name: w.app_name().unwrap_or_default(),
+                rect: PhysRect::new(
+                    (w.x().unwrap_or(0) as f32 * scale).round() as i32,
+                    (w.y().unwrap_or(0) as f32 * scale).round() as i32,
+                    (width as f32 * scale).round() as u32,
+                    (height as f32 * scale).round() as u32,
+                ),
+            });
+        }
+        Ok(out)
     }
 }
 
