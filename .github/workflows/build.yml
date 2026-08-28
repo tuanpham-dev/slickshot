@@ -14,7 +14,13 @@ env:
 jobs:
   test:
     name: Test (typecheck, unit tests, clippy)
-    runs-on: ubuntu-22.04
+    # ubuntu-24.04, not -22.04: 22.04's libpipewire-0.3-dev is too old for
+    # the pipewire/libspa crates xcap pulls in on Linux (bindgen generates
+    # their FFI struct from whatever headers are installed, and the crates'
+    # hand-written wrapper code references fields -- e.g. spa_video_info_raw
+    # ::flags -- that 22.04's headers don't have yet), so cargo fails with
+    # "no field `flags`" instead of a normal compile error.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -129,9 +135,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          # ubuntu-24.04(-arm), not -22.04: same libpipewire-0.3-dev/xcap
+          # version mismatch as the `test` job above. Trade-off worth knowing
+          # about: the shipped .deb/.rpm/AppImage now link against 24.04's
+          # newer glibc/PipeWire baseline, which could matter for installs on
+          # older distros (e.g. Ubuntu 22.04, Debian 11).
+          - os: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
-          - os: ubuntu-22.04-arm
+          - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
@@ -145,7 +156,7 @@ jobs:
       # from one native build -- no separate Fedora runner needed, the .rpm
       # from this same job is the Fedora-installable package.
       - name: Install Linux Tauri build dependencies
-        if: startsWith(matrix.os, 'ubuntu-22.04')
+        if: startsWith(matrix.os, 'ubuntu-24.04')
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -188,7 +199,7 @@ jobs:
       - name: Build and publish release (tag push)
         if: startsWith(github.ref, 'refs/tags/v')
         id: tauri_release
-        continue-on-error: ${{ startsWith(matrix.os, 'ubuntu-22.04') }}
+        continue-on-error: ${{ startsWith(matrix.os, 'ubuntu-24.04') }}
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -202,7 +213,7 @@ jobs:
       - name: Build only (manual dispatch)
         if: github.event_name == 'workflow_dispatch' && !startsWith(github.ref, 'refs/tags/v')
         id: tauri_dispatch
-        continue-on-error: ${{ startsWith(matrix.os, 'ubuntu-22.04') }}
+        continue-on-error: ${{ startsWith(matrix.os, 'ubuntu-24.04') }}
         uses: tauri-apps/tauri-action@v0
         with:
           args: --target ${{ matrix.target }}
@@ -215,7 +226,7 @@ jobs:
       # .deb/.rpm/.AppImage aren't all present afterward -- so a real
       # failure (not just this known quirk) still fails CI.
       - name: Verify Linux bundles (fix AppImage if needed)
-        if: startsWith(matrix.os, 'ubuntu-22.04')
+        if: startsWith(matrix.os, 'ubuntu-24.04')
         run: |
           BUNDLE_DIR="src-tauri/target/${{ matrix.target }}/release/bundle"
           shopt -s nullglob
