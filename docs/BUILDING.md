@@ -8,6 +8,17 @@ pnpm tauri build
 
 Produces release bundles under `src-tauri/target/release/bundle/` — `deb/` and `rpm/` on Fedora/most Linux distros, plus an `appimage/` attempt (see below). Pass `--bundles <deb,rpm,appimage>` to build a subset, e.g. `pnpm tauri build --bundles appimage` to (re)build just one format without recompiling from scratch if `target/release` is already up to date.
 
+## macOS: unsigned builds say "is damaged and can't be opened"
+
+Neither `tauri.conf.json` nor the CI workflow configures code signing or notarization (that needs an active Apple Developer Program membership), so the `.app`/`.dmg` Tauri produces is only ad-hoc/linker-signed — no Team ID. That's fine for a build you compile and run yourself, since it was never downloaded and so never picked up the quarantine attribute Gatekeeper checks. But a build fetched via a browser (a CI artifact, a release download) does get quarantined, and Gatekeeper won't accept an ad-hoc signature on a quarantined app — instead of the friendlier "unidentified developer" prompt you'd get from an unsigned-but-not-quarantined app, it reports the misleading **"is damaged and can't be opened, you should move it to the Trash."** The app isn't actually corrupted.
+
+**Fix**, either:
+
+- Right-click (or Control-click) `SlickShot.app` → **Open** → confirm through the dialog that appears, or
+- Clear the quarantine attribute directly: `xattr -cr /path/to/SlickShot.app`
+
+Real code signing + notarization would avoid this entirely, but requires an Apple Developer account and adding signing secrets to the CI workflow.
+
 ## AppImage: known build issue and fix
 
 As of this writing, `pnpm tauri build` (or `--bundles appimage`) reliably fails at the AppImage step with:
