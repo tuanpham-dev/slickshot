@@ -86,16 +86,27 @@ fn position_fullscreen(window: &WebviewWindow, rect: PhysRect) -> Result<(), Str
     // should cover the whole monitor. Fullscreening after positioning
     // makes the WM give it the monitor's full geometry, panel included.
     //
-    // NOT on macOS: there `set_fullscreen(true)` triggers *native*
+    // NOT `set_fullscreen(true)` on macOS: that triggers *native*
     // fullscreen, which macOS moves into its own isolated Space. With one
-    // overlay window per monitor, each overlay lands on a separate desktop
-    // instead of being a borderless always-on-top window covering its
-    // monitor -- so the multi-monitor overlay collapses to a single
-    // full-screen Space. The explicit physical set_size/set_position above
-    // already covers the monitor correctly on macOS (and Windows), so the
-    // fullscreen call is only needed as the X11 WM workaround.
+    // overlay window per monitor, each overlay would land on a separate
+    // desktop instead of being a borderless always-on-top window covering
+    // its monitor -- so the multi-monitor overlay would collapse to a
+    // single full-screen Space.
     #[cfg(not(target_os = "macos"))]
     window.set_fullscreen(true).map_err(|e| e.to_string())?;
+
+    // On macOS, an ordinary window's frame is still clipped to the menu
+    // bar's screen strip even when explicitly positioned/sized to cover
+    // it (regular NSWindow levels don't draw over the menu bar) -- the
+    // overlay's dimmed frame and drag-selection would stop short of the
+    // real top of the screen. `set_simple_fullscreen` is tao/Tauri's
+    // non-Space-based fullscreen: it auto-hides the menu bar and dock and
+    // resizes the window to the screen's *full* frame (menu bar strip
+    // included), without the per-monitor-Space problem above.
+    #[cfg(target_os = "macos")]
+    window
+        .set_simple_fullscreen(true)
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -208,6 +219,12 @@ pub fn close_overlays(app: &AppHandle) {
         .collect();
     for label in labels {
         if let Some(w) = app.get_webview_window(&label) {
+            // `set_simple_fullscreen`'s auto-hidden menu bar/dock is an
+            // NSApplication-wide presentation option, not per-window --
+            // leaving it enabled after hiding would leave the real menu
+            // bar/dock auto-hidden system-wide until the app quits.
+            #[cfg(target_os = "macos")]
+            let _ = w.set_simple_fullscreen(false);
             let _ = w.hide();
         }
     }
