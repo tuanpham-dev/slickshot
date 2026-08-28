@@ -2,7 +2,7 @@
 
 A multi-platform screenshot capture and annotation tool built with Tauri 2 + React.
 
-**Website:** <https://tuanpham-dev.github.io/slickshot/> — the source lives in [`site/`](site/) and is published by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) on every push to `main` that touches it.
+**Website:** <https://tuanpham-dev.github.io/slickshot/> - the source lives in [`site/`](site/) and is published by [`.github/workflows/pages.yml`](.github/workflows/pages.yml) on every push to `main` that touches it.
 
 ## Features
 

@@ -6,7 +6,7 @@
 <title>SlickShot</title>
 <meta name="description" content="A screenshot tool that finishes the job: capture any region, annotate it, pull the text out of it, and put it on the clipboard, on disk, or on the web. Tauri 2 + React, for Linux, Windows and macOS.">
 <meta property="og:title" content="SlickShot">
-<meta property="og:description" content="Capture, annotate, extract text, and ship — one small native app for Linux, Windows and macOS.">
+<meta property="og:description" content="Capture, annotate, extract text, and ship - one small native app for Linux, Windows and macOS.">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://tuanpham-dev.github.io/slickshot/">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%234d7ef0'/%3E%3Cg transform='translate(106,106) scale(12.5)' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m14.31 8 5.74 9.94'/%3E%3Cpath d='M9.69 8h11.48'/%3E%3Cpath d='m7.38 12 5.74-9.94'/%3E%3Cpath d='M9.69 16 3.95 6.06'/%3E%3Cpath d='M14.31 16H2.83'/%3E%3Cpath d='m16.62 12-5.74 9.94'/%3E%3C/g%3E%3C/svg%3E">
@@ -15,7 +15,7 @@
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
 /* ============================================================
-   Tokens — dark-first, lifted from the app's own src/styles/tokens.css
+   Tokens - dark-first, lifted from the app's own src/styles/tokens.css
    so the site and the product share one palette.
    ============================================================ */
 :root {
@@ -148,7 +148,7 @@ code, kbd, .mono { font-family: var(--font-mono); font-variant-ligatures: none; 
   padding-inline: 24px;
 }
 
-/* Small mono chip used as a section eyebrow — named after the app's own
+/* Small mono chip used as a section eyebrow - named after the app's own
    verbs (capture / annotate / extract / export / cli), not decorative. */
 .eyebrow {
   display: inline-flex;
@@ -269,7 +269,7 @@ html { scroll-behavior: smooth; }
 .btn-icon { width: 38px; padding: 0; }
 
 /* ============================================================
-   Hero — the page opens inside a region selection, because that is the
+   Hero - the page opens inside a region selection, because that is the
    first thing anyone does with this app.
    ============================================================ */
 .hero {
@@ -394,7 +394,7 @@ section.band { padding: clamp(64px, 8vw, 104px) 0; border-bottom: 1px solid var(
 .sec-head .lede { margin-top: -2px; }
 
 /* ============================================================
-   Product recreations — built from the app's real components so the
+   Product recreations - built from the app's real components so the
    spacing, sizes and icons match what ships.
    ============================================================ */
 .frame {
@@ -972,7 +972,7 @@ tbody tr:last-child td { border-bottom: 0; }
 </head>
 <body>
 
-<!-- lucide icon set (v0.475.0, ISC) — the same icons the app renders -->
+<!-- lucide icon set (v0.475.0, ISC) - the same icons the app renders -->
 <svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
   <symbol id="i-camera" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></symbol>
   <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
@@ -1073,7 +1073,7 @@ tbody tr:last-child td { border-bottom: 0; }
       <span class="dim" id="dim">960 × 420</span>
 
       <h1>The screenshot tool that finishes the job.</h1>
-      <p class="lede">Drag a region, annotate it, pull the text out of it, and put it on the clipboard, in a folder, or on the web &mdash; without ever leaving the capture.</p>
+      <p class="lede">Drag a region, annotate it, pull the text out of it, and put it on the clipboard, in a folder, or on the web - without ever leaving the capture.</p>
       <div class="hero-cta">
         <a class="btn btn-primary btn-lg" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
           <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
@@ -1153,7 +1153,7 @@ tbody tr:last-child td { border-bottom: 0; }
           <span class="mode-ic"><svg class="ic"><use href="#i-maximize"/></svg></span>
           <div>
             <h3>Screen, monitor, window <kbd>Shift/Ctrl+PrintScreen</kbd></h3>
-            <p>The whole virtual desktop, one monitor picked by name and resolution, or a single window &mdash; each straight to the editor.</p>
+            <p>The whole virtual desktop, one monitor picked by name and resolution, or a single window - each straight to the editor.</p>
           </div>
         </div>
         <div class="mode">
@@ -1167,7 +1167,7 @@ tbody tr:last-child td { border-bottom: 0; }
           <span class="mode-ic"><svg class="ic"><use href="#i-pipette"/></svg></span>
           <div>
             <h3>Pick color</h3>
-            <p>Magnify any pixel on screen and lift its value &mdash; no capture, no editor, straight to the clipboard.</p>
+            <p>Magnify any pixel on screen and lift its value - no capture, no editor, straight to the clipboard.</p>
           </div>
         </div>
         <div class="mode">
@@ -1181,7 +1181,7 @@ tbody tr:last-child td { border-bottom: 0; }
           <span class="mode-ic"><svg class="ic"><use href="#i-languages"/></svg></span>
           <div>
             <h3>Translate / extract text <kbd>Ctrl+Shift+PrintScreen</kbd></h3>
-            <p>Drag over text in an image, a video, or an app that won't let you select it, and get it back as text &mdash; optionally translated. <a href="#extract">More below</a>.</p>
+            <p>Drag over text in an image, a video, or an app that won't let you select it, and get it back as text - optionally translated. <a href="#extract">More below</a>.</p>
           </div>
         </div>
       </div>
@@ -1195,7 +1195,7 @@ tbody tr:last-child td { border-bottom: 0; }
     <div class="sec-head">
       <span class="eyebrow">annotate</span>
       <h2>A real editor, not a doodle pad.</h2>
-      <p class="lede">Fifteen tools with single-key shortcuts, full undo/redo, and a properties panel that follows whatever you have selected. Shapes stay editable after you draw them &mdash; move, restyle, or delete any of them at any point.</p>
+      <p class="lede">Fifteen tools with single-key shortcuts, full undo/redo, and a properties panel that follows whatever you have selected. Shapes stay editable after you draw them - move, restyle, or delete any of them at any point.</p>
     </div>
 
     <div class="editor-scroll">
@@ -1290,11 +1290,11 @@ tbody tr:last-child td { border-bottom: 0; }
                 </div>
               </div>
               <div>
-                <span class="prop-label">Stroke width &mdash; 3&nbsp;px</span>
+                <span class="prop-label">Stroke width - 3&nbsp;px</span>
                 <div class="track"><i style="width:34%"></i><b style="left:34%"></b></div>
               </div>
               <div>
-                <span class="prop-label">Opacity &mdash; 100%</span>
+                <span class="prop-label">Opacity - 100%</span>
                 <div class="track"><i style="width:100%"></i><b style="left:100%"></b></div>
               </div>
               <div>
@@ -1366,12 +1366,12 @@ tbody tr:last-child td { border-bottom: 0; }
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-frame"/></svg>
         <h3>Backdrop</h3>
-        <p>Pad the shot with a gradient or solid-colour background from a set of presets &mdash; for slides and release notes where a bare screenshot looks unfinished.</p>
+        <p>Pad the shot with a gradient or solid-colour background from a set of presets - for slides and release notes where a bare screenshot looks unfinished.</p>
       </div>
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-grid-3x3"/></svg>
         <h3>Pixelate &amp; highlight</h3>
-        <p>Mosaic over anything that shouldn't ship &mdash; tokens, addresses, customer names &mdash; and swipe a translucent highlighter over what should.</p>
+        <p>Mosaic over anything that shouldn't ship - tokens, addresses, customer names - and swipe a translucent highlighter over what should.</p>
       </div>
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-crop"/></svg>
@@ -1381,7 +1381,7 @@ tbody tr:last-child td { border-bottom: 0; }
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-image-plus"/></svg>
         <h3>Insert an image</h3>
-        <p>Drop a second image onto the canvas &mdash; a logo, a cursor, another capture &mdash; and move or resize it like any other shape.</p>
+        <p>Drop a second image onto the canvas - a logo, a cursor, another capture - and move or resize it like any other shape.</p>
       </div>
     </div>
   </div>
@@ -1394,12 +1394,12 @@ tbody tr:last-child td { border-bottom: 0; }
       <div class="sec-head">
         <span class="eyebrow">extract</span>
         <h2>Text out of anything on screen.</h2>
-        <p class="lede">Drag over a paused video, a screenshot someone pasted into chat, an error dialog that won't let you select its own message &mdash; and get the text back. QR codes in the same region are decoded in the same pass.</p>
+        <p class="lede">Drag over a paused video, a screenshot someone pasted into chat, an error dialog that won't let you select its own message - and get the text back. QR codes in the same region are decoded in the same pass.</p>
       </div>
 
       <div class="frame ocr-panel" role="img" aria-label="The extract-text result popover, showing Original and Translation tabs, the recognised text, a decoded QR code, and Copy text and Listen buttons.">
         <div class="frame-bar" aria-hidden="true">
-          <span class="frame-title" style="margin-left:0">Extract text &mdash; 412 &times; 96</span>
+          <span class="frame-title" style="margin-left:0">Extract text - 412 &times; 96</span>
         </div>
         <div class="ocr-body" aria-hidden="true">
           <div class="ocr-tabs"><span class="on">Original</span><span>Translation</span></div>
@@ -1420,11 +1420,11 @@ tbody tr:last-child td { border-bottom: 0; }
         <div class="card">
           <svg class="ic ic-lg" aria-hidden="true"><use href="#i-cpu"/></svg>
           <h3>Native engines, on device</h3>
-          <p>Recognition runs locally on every platform &mdash; nothing is uploaded to read your screen.</p>
+          <p>Recognition runs locally on every platform - nothing is uploaded to read your screen.</p>
           <ul>
-            <li><b>macOS</b> &mdash; the built-in Vision framework</li>
-            <li><b>Windows</b> &mdash; the built-in Windows.Media.Ocr engine</li>
-            <li><b>Linux</b> &mdash; Tesseract, pulled in as a package dependency by the .deb and .rpm</li>
+            <li><b>macOS</b> - the built-in Vision framework</li>
+            <li><b>Windows</b> - the built-in Windows.Media.Ocr engine</li>
+            <li><b>Linux</b> - Tesseract, pulled in as a package dependency by the .deb and .rpm</li>
           </ul>
         </div>
         <div class="card">
@@ -1469,7 +1469,7 @@ tbody tr:last-child td { border-bottom: 0; }
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-keyboard"/></svg>
         <h3>Tray and hotkeys</h3>
-        <p>Lives in the tray with global hotkeys for every capture mode. All of them are rebindable in Settings &mdash; including the three that ship unbound.</p>
+        <p>Lives in the tray with global hotkeys for every capture mode. All of them are rebindable in Settings - including the three that ship unbound.</p>
       </div>
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-image"/></svg>
@@ -1479,7 +1479,7 @@ tbody tr:last-child td { border-bottom: 0; }
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-layers"/></svg>
         <h3>Settings that stick</h3>
-        <p>Shortcuts, save folder, format and quality, export scale, theme, OCR and translation languages, upload credentials &mdash; all persisted across restarts.</p>
+        <p>Shortcuts, save folder, format and quality, export scale, theme, OCR and translation languages, upload credentials - all persisted across restarts.</p>
       </div>
     </div>
   </div>
@@ -1491,7 +1491,7 @@ tbody tr:last-child td { border-bottom: 0; }
     <div class="sec-head">
       <span class="eyebrow">cli</span>
       <h2>The same binary, without the window.</h2>
-      <p class="lede">Non-interactive commands run headless &mdash; no window ever opens, and they work whether or not the app is already running. <code>region</code>, <code>window</code> and <code>open</code> forward to a running instance, or launch one.</p>
+      <p class="lede">Non-interactive commands run headless - no window ever opens, and they work whether or not the app is already running. <code>region</code>, <code>window</code> and <code>open</code> forward to a running instance, or launch one.</p>
     </div>
 
     <div class="frame term">
@@ -1556,15 +1556,15 @@ tbody tr:last-child td { border-bottom: 0; }
           </thead>
           <tbody>
             <tr>
-              <td><b>Linux &mdash; X11</b></td>
+              <td><b>Linux - X11</b></td>
               <td>x11rb + xcap</td>
               <td>Tesseract</td>
               <td><span class="status ok">Developed and used here</span></td>
             </tr>
             <tr>
-              <td><b>Linux &mdash; Wayland</b></td>
+              <td><b>Linux - Wayland</b></td>
               <td>Not implemented</td>
-              <td>&mdash;</td>
+              <td>-</td>
               <td><span class="status off">Seam ready for a portal backend</span></td>
             </tr>
             <tr>
@@ -1595,7 +1595,7 @@ tbody tr:last-child td { border-bottom: 0; }
       </div>
       <div class="note">
         <svg class="ic ic-sm" aria-hidden="true"><use href="#i-triangle-alert"/></svg>
-        <p><b>Windows: PrintScreen may already be taken</b> by Snipping Tool or OneDrive. The app tells you when the hotkey can't register &mdash; rebind it in Settings &gt; Shortcuts.</p>
+        <p><b>Windows: PrintScreen may already be taken</b> by Snipping Tool or OneDrive. The app tells you when the hotkey can't register - rebind it in Settings &gt; Shortcuts.</p>
       </div>
       <div class="note">
         <svg class="ic ic-sm" aria-hidden="true"><use href="#i-triangle-alert"/></svg>
@@ -1611,7 +1611,7 @@ tbody tr:last-child td { border-bottom: 0; }
     <div class="sec-head">
       <span class="eyebrow">install</span>
       <h2>Get SlickShot.</h2>
-      <p class="lede">Every platform is bundled on the Releases page &mdash; CI builds them all from the same tag, so the versions never drift apart. Pick your format below.</p>
+      <p class="lede">Every platform is bundled on the Releases page - CI builds them all from the same tag, so the versions never drift apart. Pick your format below.</p>
     </div>
 
     <div class="release-bar">
@@ -1650,7 +1650,7 @@ tbody tr:last-child td { border-bottom: 0; }
       </div>
       <div class="pkg">
         <h3><svg class="ic" aria-hidden="true"><use href="#i-package"/></svg> AppImage</h3>
-        <p class="grow">Self-contained, so it can't declare dependencies &mdash; install Tesseract yourself if you want OCR. The app detects it's missing and shows the right command for your distro.</p>
+        <p class="grow">Self-contained, so it can't declare dependencies - install Tesseract yourself if you want OCR. The app detects it's missing and shows the right command for your distro.</p>
         <div class="cmd">
           <pre><span class="p">$ </span>chmod +x SlickShot_*.AppImage
 <span class="p">$ </span>./SlickShot_*.AppImage</pre>
@@ -1662,7 +1662,7 @@ tbody tr:last-child td { border-bottom: 0; }
       </div>
       <div class="pkg">
         <h3><svg class="ic" aria-hidden="true"><use href="#i-app-window"/></svg> Windows</h3>
-        <p class="grow">Run the installer &mdash; both an <code>.msi</code> and an <code>.exe</code> are published. OCR uses the engine already in Windows, so there's nothing else to set up.</p>
+        <p class="grow">Run the installer - both an <code>.msi</code> and an <code>.exe</code> are published. OCR uses the engine already in Windows, so there's nothing else to set up.</p>
         <a class="btn" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
           <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
           Open the Releases page
@@ -1670,7 +1670,7 @@ tbody tr:last-child td { border-bottom: 0; }
       </div>
       <div class="pkg">
         <h3><svg class="ic" aria-hidden="true"><use href="#i-cpu"/></svg> macOS</h3>
-        <p class="grow">Open the <code>.dmg</code> and drag SlickShot to Applications. OCR uses the built-in Vision framework &mdash; nothing to install. Grant Screen Recording on first capture.</p>
+        <p class="grow">Open the <code>.dmg</code> and drag SlickShot to Applications. OCR uses the built-in Vision framework - nothing to install. Grant Screen Recording on first capture.</p>
         <a class="btn" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
           <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
           Open the Releases page
@@ -1759,7 +1759,7 @@ tbody tr:last-child td { border-bottom: 0; }
 </footer>
 
 <script>
-// Theme toggle — mirrors the app's own system / light / dark setting.
+// Theme toggle - mirrors the app's own system / light / dark setting.
 (function () {
   var root = document.documentElement;
   var btn = document.getElementById("theme-toggle");
