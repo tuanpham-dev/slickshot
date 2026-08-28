@@ -134,7 +134,7 @@ pub fn ocr_list_langs(app: AppHandle) -> Vec<String> {
         let _ = app;
         let mut langs = vision::supported_tesseract_langs();
         langs.sort();
-        return langs;
+        langs
     }
     #[cfg(target_os = "windows")]
     {
