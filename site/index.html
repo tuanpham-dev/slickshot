@@ -1,0 +1,1834 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SlickShot</title>
+<meta name="description" content="A screenshot tool that finishes the job: capture any region, annotate it, pull the text out of it, and put it on the clipboard, on disk, or on the web. Tauri 2 + React, for Linux, Windows and macOS.">
+<meta property="og:title" content="SlickShot">
+<meta property="og:description" content="Capture, annotate, extract text, and ship — one small native app for Linux, Windows and macOS.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://tuanpham-dev.github.io/slickshot/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' rx='112' fill='%234d7ef0'/%3E%3Cg transform='translate(106,106) scale(12.5)' fill='none' stroke='%23fff' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m14.31 8 5.74 9.94'/%3E%3Cpath d='M9.69 8h11.48'/%3E%3Cpath d='m7.38 12 5.74-9.94'/%3E%3Cpath d='M9.69 16 3.95 6.06'/%3E%3Cpath d='M14.31 16H2.83'/%3E%3Cpath d='m16.62 12-5.74 9.94'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* ============================================================
+   Tokens — dark-first, lifted from the app's own src/styles/tokens.css
+   so the site and the product share one palette.
+   ============================================================ */
+:root {
+  --ground: #0d0f13;
+  --field: #050609;
+  --surface: #1a1d23;
+  --surface-2: #22252c;
+  --surface-3: #2a2e36;
+  --border: #2c2f38;
+  --border-strong: #3d414c;
+  --fg: #eef0f3;
+  --fg-muted: #a7abb5;
+  --fg-subtle: #767b86;
+  --accent: #6690f0;
+  --accent-2: #82a4f5;
+  --accent-fg: #0c1220;
+  --accent-soft: rgba(102, 144, 240, 0.13);
+  --ok: #3fc178;
+  --warn: #d9a441;
+  --danger: #e2685f;
+  --grid: rgba(120, 160, 245, 0.055);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.45);
+  --shadow-lg: 0 24px 64px rgba(0, 0, 0, 0.55);
+  --mask: rgba(6, 7, 10, 0.72);
+
+  --font-display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+  --font-sans: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "Cascadia Code", Consolas, monospace;
+
+  --r-sm: 4px;
+  --r-md: 6px;
+  --r-lg: 10px;
+  --r-xl: 16px;
+  --col: 1140px;
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme="dark"]) {
+    --ground: #f1f3f6;
+    --field: #d3d7e0;
+    --surface: #ffffff;
+    --surface-2: #f0f1f4;
+    --surface-3: #e6e8ed;
+    --border: #e2e4e9;
+    --border-strong: #cbced6;
+    --fg: #16181d;
+    --fg-muted: #5c626b;
+    --fg-subtle: #838790;
+    --accent: #3b6fe0;
+    --accent-2: #2f5cc4;
+    --accent-fg: #ffffff;
+    --accent-soft: rgba(59, 111, 224, 0.1);
+    --ok: #1f9d55;
+    --warn: #9c6510;
+    --danger: #d13c3c;
+    --grid: rgba(59, 111, 224, 0.08);
+    --shadow-md: 0 4px 16px rgba(16, 20, 30, 0.1);
+    --shadow-lg: 0 24px 64px rgba(16, 20, 30, 0.16);
+    --mask: rgba(210, 214, 222, 0.72);
+  }
+}
+
+:root[data-theme="light"] {
+  --ground: #f1f3f6;
+  --field: #d3d7e0;
+  --surface: #ffffff;
+  --surface-2: #f0f1f4;
+  --surface-3: #e6e8ed;
+  --border: #e2e4e9;
+  --border-strong: #cbced6;
+  --fg: #16181d;
+  --fg-muted: #5c626b;
+  --fg-subtle: #838790;
+  --accent: #3b6fe0;
+  --accent-2: #2f5cc4;
+  --accent-fg: #ffffff;
+  --accent-soft: rgba(59, 111, 224, 0.1);
+  --ok: #1f9d55;
+  --warn: #9c6510;
+  --danger: #d13c3c;
+  --grid: rgba(59, 111, 224, 0.08);
+  --shadow-md: 0 4px 16px rgba(16, 20, 30, 0.1);
+  --shadow-lg: 0 24px 64px rgba(16, 20, 30, 0.16);
+  --mask: rgba(210, 214, 222, 0.72);
+}
+
+/* ============================================================
+   Base
+   ============================================================ */
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 16px;
+  line-height: 1.65;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+  font-family: var(--font-display);
+  text-wrap: balance;
+  margin: 0;
+  line-height: 1.06;
+  letter-spacing: -0.028em;
+}
+
+h1 { font-size: clamp(2.5rem, 6vw, 4.35rem); font-weight: 800; }
+h2 { font-size: clamp(1.7rem, 3.1vw, 2.4rem); font-weight: 700; }
+h3 { font-size: 1.0625rem; font-weight: 700; letter-spacing: -0.012em; line-height: 1.3; }
+p { margin: 0; }
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-2); }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 3px;
+}
+
+code, kbd, .mono { font-family: var(--font-mono); font-variant-ligatures: none; }
+
+.wrap {
+  width: 100%;
+  max-width: var(--col);
+  margin-inline: auto;
+  padding-inline: 24px;
+}
+
+/* Small mono chip used as a section eyebrow — named after the app's own
+   verbs (capture / annotate / extract / export / cli), not decorative. */
+.eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent);
+  background: var(--accent-soft);
+  border: 1px solid color-mix(in srgb, var(--accent) 26%, transparent);
+  border-radius: 999px;
+  padding: 3px 11px 3px 9px;
+}
+.eyebrow::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  border-radius: 1px;
+  background: var(--accent);
+}
+
+.lede {
+  color: var(--fg-muted);
+  font-size: 1.0625rem;
+  max-width: 62ch;
+}
+
+/* every icon is a lucide glyph, stroked exactly the way the app strokes it */
+.ic {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+.ic-sm { width: 16px; height: 16px; }
+.ic-lg { width: 22px; height: 22px; }
+
+section[id], main[id] { scroll-margin-top: 76px; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+
+/* ============================================================
+   Header
+   ============================================================ */
+.site-head {
+  position: sticky;
+  top: 0;
+  z-index: 50;
+  background: color-mix(in srgb, var(--ground) 88%, transparent);
+  backdrop-filter: blur(12px);
+  border-bottom: 1px solid var(--border);
+}
+.head-inner {
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  height: 60px;
+}
+.brand {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--fg);
+  font-family: var(--font-display);
+  font-weight: 800;
+  font-size: 17px;
+  letter-spacing: -0.02em;
+}
+.brand:hover { color: var(--fg); }
+.brand-mark { width: 26px; height: 26px; border-radius: 7px; flex: none; }
+.head-nav {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+}
+.head-nav a {
+  color: var(--fg-muted);
+  font-size: 14px;
+  font-weight: 500;
+  padding: 6px 11px;
+  border-radius: var(--r-md);
+}
+.head-nav a:hover { color: var(--fg); background: var(--surface-2); }
+.head-actions { display: flex; align-items: center; gap: 8px; }
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  height: 38px;
+  padding-inline: 16px;
+  border-radius: var(--r-md);
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--fg);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: background 140ms cubic-bezier(0.16, 1, 0.3, 1), border-color 140ms, color 140ms;
+}
+.btn:hover { background: var(--surface-3); border-color: var(--fg-subtle); color: var(--fg); }
+.btn-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+  font-weight: 600;
+}
+.btn-primary:hover { background: var(--accent-2); border-color: var(--accent-2); color: var(--accent-fg); }
+.btn-lg { height: 46px; padding-inline: 22px; font-size: 15px; }
+.btn-icon { width: 38px; padding: 0; }
+
+/* ============================================================
+   Hero — the page opens inside a region selection, because that is the
+   first thing anyone does with this app.
+   ============================================================ */
+.hero {
+  position: relative;
+  overflow: hidden;
+  background: var(--field);
+  border-bottom: 1px solid var(--border);
+  padding: clamp(56px, 9vw, 104px) 0 clamp(64px, 10vw, 116px);
+}
+.hero::before {
+  /* the desktop being captured: a faint pixel grid under the mask */
+  content: "";
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(var(--grid) 1px, transparent 1px),
+    linear-gradient(90deg, var(--grid) 1px, transparent 1px);
+  background-size: 32px 32px;
+  mask-image: radial-gradient(120% 90% at 50% 40%, #000 25%, transparent 78%);
+}
+.hero::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(90% 70% at 50% 8%, color-mix(in srgb, var(--accent) 15%, transparent), transparent 62%);
+  pointer-events: none;
+}
+
+.selection {
+  position: relative;
+  z-index: 2;
+  width: min(100%, 960px);
+  margin-inline: auto;
+  background: var(--ground);
+  border-radius: 2px;
+  padding: clamp(32px, 5vw, 56px) clamp(24px, 5vw, 60px) clamp(36px, 5vw, 56px);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--accent) 34%, transparent), 0 0 90px -10px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* crosshair rules bleeding off both edges, as on the capture overlay */
+.rule { position: absolute; background: color-mix(in srgb, var(--accent) 30%, transparent); pointer-events: none; }
+.rule-t, .rule-b { left: -50vw; right: -50vw; height: 1px; }
+.rule-l, .rule-r { top: -50vh; bottom: -50vh; width: 1px; }
+.rule-t { top: -1px; }
+.rule-b { bottom: -1px; }
+.rule-l { left: -1px; }
+.rule-r { right: -1px; }
+
+.ants {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+  pointer-events: none;
+}
+.ants rect {
+  fill: none;
+  stroke: var(--accent);
+  stroke-width: 2;
+  stroke-dasharray: 7 5;
+  animation: ants 14s linear infinite;
+}
+@keyframes ants { to { stroke-dashoffset: -240; } }
+
+.handle {
+  position: absolute;
+  width: 9px;
+  height: 9px;
+  background: var(--accent);
+  border-radius: 1px;
+  box-shadow: 0 0 0 2px var(--field);
+}
+.handle.tl { top: -5px; left: -5px; }
+.handle.tr { top: -5px; right: -5px; }
+.handle.bl { bottom: -5px; left: -5px; }
+.handle.br { bottom: -5px; right: -5px; }
+
+.dim {
+  position: absolute;
+  top: -30px;
+  left: 0;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--accent-fg);
+  background: var(--accent);
+  padding: 2px 8px;
+  border-radius: var(--r-sm);
+  font-variant-numeric: tabular-nums;
+}
+
+.hero h1 { max-width: 15ch; }
+.hero .lede { margin-top: 22px; font-size: clamp(1.0625rem, 1.6vw, 1.1875rem); }
+.hero-cta { display: flex; flex-wrap: wrap; gap: 12px; margin-top: 34px; }
+.hero-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-top: 26px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--fg-subtle);
+}
+.hero-meta span { display: inline-flex; align-items: center; gap: 7px; }
+
+/* fade the selection in on load, like a drag that just landed */
+@media (prefers-reduced-motion: no-preference) {
+  .selection { animation: land 620ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .selection > .rule { animation: fade 700ms 180ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+  .dim, .handle { animation: fade 500ms 420ms cubic-bezier(0.16, 1, 0.3, 1) both; }
+  @keyframes land { from { opacity: 0; transform: scale(0.975); } to { opacity: 1; transform: none; } }
+  @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+}
+
+/* ============================================================
+   Sections
+   ============================================================ */
+section.band { padding: clamp(64px, 8vw, 104px) 0; border-bottom: 1px solid var(--border); }
+.sec-head { display: flex; flex-direction: column; gap: 16px; align-items: flex-start; }
+.sec-head h2 { max-width: 20ch; }
+.sec-head .lede { margin-top: -2px; }
+
+/* ============================================================
+   Product recreations — built from the app's real components so the
+   spacing, sizes and icons match what ships.
+   ============================================================ */
+.frame {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-xl);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.frame-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: 34px;
+  padding-inline: 13px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+.dot { width: 9px; height: 9px; border-radius: 50%; background: var(--border-strong); }
+.frame-title {
+  margin-left: 6px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-subtle);
+}
+
+/* --- main window --- */
+.capture-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 420px) minmax(0, 1fr);
+  gap: clamp(32px, 5vw, 64px);
+  align-items: start;
+  margin-top: 44px;
+}
+.appwin { width: 100%; }
+.appwin-body { display: flex; flex-direction: column; gap: 16px; padding: 16px; background: var(--ground); }
+.appwin-head { display: flex; align-items: center; justify-content: space-between; }
+.appwin-head strong { font-size: 13.5px; font-weight: 600; }
+.iconbtn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  border-radius: var(--r-md);
+  border: 0;
+  background: transparent;
+  color: var(--fg-muted);
+}
+.tiles { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.tile {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 16px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  transition: background 120ms, border-color 120ms;
+}
+.tile:hover { background: var(--surface-3); border-color: var(--border-strong); }
+.tile .ic { color: var(--accent); }
+.tile b { font-size: 13.5px; font-weight: 500; }
+.tile .key { font-family: var(--font-mono); font-size: 10px; color: var(--fg-muted); }
+.tile-wide {
+  grid-column: span 2;
+  flex-direction: row;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: var(--r-md);
+}
+.tile-half { flex-direction: row; justify-content: flex-start; gap: 10px; padding: 10px 14px; border-radius: var(--r-md); }
+.tile-wide .key, .tile-half .key { margin-left: auto; }
+.seg {
+  display: inline-flex;
+  gap: 2px;
+  padding: 2px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.seg span {
+  padding: 4px 11px;
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}
+.seg span.on { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-md); }
+.appwin-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  font-size: 11px;
+  color: var(--fg-muted);
+}
+.appwin-foot code { font-size: 11px; }
+
+/* --- mode list beside the window --- */
+.mode-list { display: flex; flex-direction: column; gap: 2px; }
+.mode {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 14px;
+  padding: 15px 0;
+  border-top: 1px solid var(--border);
+}
+.mode:first-child { border-top: 0; padding-top: 0; }
+.mode-ic {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+.mode h3 { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.mode p { color: var(--fg-muted); font-size: 14.5px; margin-top: 4px; }
+kbd {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 500;
+  color: var(--fg-muted);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-bottom-width: 2px;
+  border-radius: var(--r-sm);
+  padding: 1px 6px;
+  white-space: nowrap;
+}
+
+/* --- editor --- */
+.editor-scroll { overflow-x: auto; margin-top: 44px; padding-bottom: 8px; }
+.editor { min-width: 860px; }
+.tools {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 60px;
+  padding-inline: 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+.tool {
+  position: relative;
+  display: grid;
+  place-items: center;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--r-md);
+  color: var(--fg-muted);
+  border: 0;
+  background: transparent;
+  transition: background 120ms, color 120ms;
+}
+.tool:hover { background: var(--surface-3); color: var(--fg); }
+.tool.on { background: var(--accent); color: var(--accent-fg); }
+
+/* the app's own Tooltip: inverted pill, label + Kbd chip, 400ms delay */
+.tip {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: var(--r-sm);
+  background: var(--fg);
+  color: var(--ground);
+  font-family: var(--font-sans);
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  box-shadow: var(--shadow-md);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 120ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.tip::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  margin-left: -5px;
+  border: 5px solid transparent;
+  border-top-color: var(--fg);
+}
+.tip b {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  font-weight: 400;
+  line-height: 1;
+  padding: 2px 4px;
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--ground) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ground) 28%, transparent);
+}
+.tool:hover .tip { opacity: 1; transition-delay: 400ms; }
+@media (prefers-reduced-motion: reduce) { .tip { transition: none; } }
+.tool-sep { width: 1px; height: 30px; background: var(--border); margin-inline: 8px; }
+.editor-mid { display: grid; grid-template-columns: minmax(0, 1fr) 216px; background: var(--surface-2); }
+.canvas-pad { display: grid; place-items: center; padding: 26px; }
+.canvas-pad svg { width: 100%; height: auto; border-radius: 3px; box-shadow: var(--shadow-md); }
+.props { border-left: 1px solid var(--border); background: var(--surface); display: flex; flex-direction: column; }
+.props-head {
+  height: 36px;
+  display: flex;
+  align-items: center;
+  padding-inline: 12px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12.5px;
+  font-weight: 600;
+}
+.props-body { padding: 12px; display: flex; flex-direction: column; gap: 16px; }
+.prop-label { font-size: 11px; color: var(--fg-muted); display: block; margin-bottom: 7px; }
+.swatches { display: flex; gap: 6px; }
+.swatch { width: 22px; height: 22px; border-radius: var(--r-sm); border: 1px solid var(--border-strong); }
+.swatch.on { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--accent); }
+.track { height: 4px; border-radius: 2px; background: var(--surface-3); position: relative; }
+.track i { position: absolute; inset: 0 auto 0 0; border-radius: 2px; background: var(--accent); }
+.track b { position: absolute; top: 50%; width: 13px; height: 13px; margin-top: -6.5px; margin-left: -6.5px; border-radius: 50%; background: var(--fg); box-shadow: var(--shadow-md); }
+.editor-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  height: 38px;
+  padding-inline: 12px;
+  background: var(--surface);
+  border-top: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--fg-muted);
+  font-variant-numeric: tabular-nums;
+}
+.editor-foot .grp { display: flex; align-items: center; gap: 12px; }
+.editor-foot .grp.right { gap: 8px; }
+.pill-select {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  height: 26px;
+  padding-inline: 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.export-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding-inline: 10px;
+  border-radius: var(--r-sm) 0 0 var(--r-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 600;
+}
+.export-caret {
+  display: grid;
+  place-items: center;
+  width: 22px;
+  height: 26px;
+  border-radius: 0 var(--r-sm) var(--r-sm) 0;
+  background: var(--accent-soft);
+  color: var(--accent);
+  border-left: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
+}
+
+/* --- shortcut grid --- */
+.keys {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
+  margin-top: 40px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  overflow: hidden;
+}
+/* hairlines as clipped box-shadows so a partly-filled last row leaves
+   plain surface behind it, not a grey gap */
+.keys div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 14px;
+  font-size: 13.5px;
+  box-shadow: 1px 0 0 var(--border), 0 1px 0 var(--border);
+}
+.keys div span { color: var(--fg-muted); }
+
+/* ============================================================
+   Extract / feature cards
+   ============================================================ */
+.extract-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 348px);
+  gap: clamp(32px, 5vw, 64px);
+  align-items: center;
+}
+.ocr-panel { max-width: 348px; width: 100%; }
+.ocr-body { padding: 12px; display: flex; flex-direction: column; gap: 10px; background: var(--surface); }
+.ocr-tabs { display: flex; gap: 4px; padding: 2px; background: var(--surface-2); border-radius: var(--r-sm); }
+.ocr-tabs span {
+  flex: 1;
+  text-align: center;
+  padding: 4px;
+  border-radius: var(--r-sm);
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--fg-muted);
+}
+.ocr-tabs span.on { background: var(--surface); color: var(--fg); box-shadow: var(--shadow-md); }
+.ocr-text { font-size: 13.5px; line-height: 1.5; }
+.ocr-actions { display: flex; gap: 8px; }
+.mini-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 30px;
+  padding-inline: 10px;
+  border-radius: var(--r-sm);
+  font-size: 12.5px;
+  font-weight: 500;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-2);
+  color: var(--fg);
+}
+.mini-btn.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-fg); }
+.qr-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-2);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--fg-muted);
+  overflow: hidden;
+}
+.qr-row .ic { color: var(--accent); }
+.qr-row span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(272px, 1fr));
+  gap: 16px;
+  margin-top: 44px;
+}
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 22px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+.card .ic { color: var(--accent); }
+.card p { color: var(--fg-muted); font-size: 14.5px; }
+.card ul { margin: 2px 0 0; padding-left: 18px; color: var(--fg-muted); font-size: 14px; }
+.card li { margin-top: 3px; }
+
+/* ============================================================
+   Terminal
+   ============================================================ */
+.term { margin-top: 44px; }
+.term-body {
+  padding: 20px 22px;
+  background: var(--surface);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.85;
+  overflow-x: auto;
+}
+.term-body div { white-space: pre; }
+.term-body .p { color: var(--accent); user-select: none; }
+.term-body .c { color: var(--fg); }
+.term-body .f { color: var(--fg-muted); }
+.term-body .o { color: var(--ok); }
+.term-body .cm { color: var(--fg-subtle); }
+
+.cli-table { margin-top: 32px; overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; min-width: 620px; font-size: 14px; }
+th, td { text-align: left; padding: 11px 16px; border-bottom: 1px solid var(--border); vertical-align: top; }
+th {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--fg-subtle);
+}
+td:first-child { white-space: nowrap; }
+td code { font-size: 12.5px; color: var(--fg); }
+tbody tr:last-child td { border-bottom: 0; }
+.tbl-wrap { border: 1px solid var(--border); border-radius: var(--r-lg); background: var(--surface); overflow: hidden; }
+
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 9px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+.status::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+.status.ok { color: var(--ok); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.status.warn { color: var(--warn); background: color-mix(in srgb, var(--warn) 16%, transparent); }
+.status.off { color: var(--fg-subtle); background: var(--surface-2); }
+
+.notes { display: flex; flex-direction: column; gap: 12px; margin-top: 28px; }
+.note {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-left: 2px solid var(--warn);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  font-size: 14px;
+  color: var(--fg-muted);
+}
+.note .ic { color: var(--warn); margin-top: 2px; }
+.note b { color: var(--fg); font-weight: 600; }
+
+/* ============================================================
+   Install
+   ============================================================ */
+.release-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px 32px;
+  margin-top: 44px;
+  padding: 24px 28px;
+  border: 1px solid color-mix(in srgb, var(--accent) 32%, var(--border));
+  border-radius: var(--r-lg);
+  background:
+    linear-gradient(90deg, var(--accent-soft), transparent 62%),
+    var(--surface);
+}
+.release-bar b { font-family: var(--font-display); font-size: 1.125rem; font-weight: 700; letter-spacing: -0.015em; }
+.release-bar p {
+  margin-top: 5px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  color: var(--fg-muted);
+}
+
+.install-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+.pkg {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 22px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+}
+.pkg h3 { display: flex; align-items: center; gap: 9px; }
+.pkg h3 .ic { color: var(--accent); }
+.pkg p { color: var(--fg-muted); font-size: 14px; }
+.pkg .grow { flex: 1; }
+.cmd {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 11px 12px;
+  border-radius: var(--r-md);
+  background: var(--ground);
+  border: 1px solid var(--border);
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.7;
+}
+.cmd pre {
+  margin: 0;
+  flex: 1;
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.cmd .p { color: var(--accent); user-select: none; }
+.copy {
+  display: grid;
+  place-items: center;
+  width: 26px;
+  height: 26px;
+  flex: none;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--fg-muted);
+  cursor: pointer;
+}
+.copy:hover { color: var(--fg); border-color: var(--border-strong); }
+.copy .ok-ic { display: none; }
+.copy.done { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, transparent); }
+.copy.done .cp-ic { display: none; }
+.copy.done .ok-ic { display: block; }
+
+/* ============================================================
+   Docs + footer
+   ============================================================ */
+.doclinks {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 12px;
+  margin-top: 40px;
+}
+.doclink {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  color: var(--fg);
+  transition: border-color 140ms, background 140ms;
+}
+.doclink:hover { border-color: var(--accent); background: var(--surface-3); color: var(--fg); }
+.doclink b { display: block; font-size: 14.5px; font-weight: 600; }
+.doclink small { color: var(--fg-muted); font-size: 13px; }
+.doclink .go { margin-left: auto; color: var(--fg-subtle); }
+
+.site-foot { padding: 40px 0 56px; }
+.foot-inner {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px 24px;
+  font-size: 13.5px;
+  color: var(--fg-muted);
+}
+.foot-inner .brand { font-size: 15px; }
+.foot-links { margin-left: auto; display: flex; gap: 20px; }
+
+/* ============================================================
+   Responsive
+   ============================================================ */
+@media (max-width: 900px) {
+  .capture-layout, .extract-layout { grid-template-columns: minmax(0, 1fr); }
+  .ocr-panel { max-width: 380px; }
+  .head-nav { display: none; }
+}
+@media (max-width: 560px) {
+  .hero-cta .btn { flex: 1 1 100%; }
+  .rule-l, .rule-r { display: none; }
+}
+</style>
+</head>
+<body>
+
+<!-- lucide icon set (v0.475.0, ISC) — the same icons the app renders -->
+<svg width="0" height="0" aria-hidden="true" focusable="false" style="position:absolute">
+  <symbol id="i-camera" viewBox="0 0 24 24"><path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3l-2.5-3z"/><circle cx="12" cy="13" r="3"/></symbol>
+  <symbol id="i-maximize" viewBox="0 0 24 24"><path d="M8 3H5a2 2 0 0 0-2 2v3"/><path d="M21 8V5a2 2 0 0 0-2-2h-3"/><path d="M3 16v3a2 2 0 0 0 2 2h3"/><path d="M16 21h3a2 2 0 0 0 2-2v-3"/></symbol>
+  <symbol id="i-app-window" viewBox="0 0 24 24"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="M10 4v4"/><path d="M2 8h20"/><path d="M6 4v4"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></symbol>
+  <symbol id="i-languages" viewBox="0 0 24 24"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></symbol>
+  <symbol id="i-scan-text" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8h8"/><path d="M7 12h10"/><path d="M7 16h6"/></symbol>
+  <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></symbol>
+  <symbol id="i-pipette" viewBox="0 0 24 24"><path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z"/></symbol>
+  <symbol id="i-ruler" viewBox="0 0 24 24"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></symbol>
+  <symbol id="i-image" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2" ry="2"/><circle cx="9" cy="9" r="2"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/></symbol>
+  <symbol id="i-settings" viewBox="0 0 24 24"><path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-1 1.73l-.43.25a2 2 0 0 1-2 0l-.15-.08a2 2 0 0 0-2.73.73l-.22.38a2 2 0 0 0 .73 2.73l.15.1a2 2 0 0 1 1 1.72v.51a2 2 0 0 1-1 1.74l-.15.09a2 2 0 0 0-.73 2.73l.22.38a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 2 0l.43.25a2 2 0 0 1 1 1.73V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 1-1.73l.43-.25a2 2 0 0 1 2 0l.15.08a2 2 0 0 0 2.73-.73l.22-.39a2 2 0 0 0-.73-2.73l-.15-.08a2 2 0 0 1-1-1.74v-.5a2 2 0 0 1 1-1.74l.15-.09a2 2 0 0 0 .73-2.73l-.22-.38a2 2 0 0 0-2.73-.73l-.15.08a2 2 0 0 1-2 0l-.43-.25a2 2 0 0 1-1-1.73V4a2 2 0 0 0-2-2z"/><circle cx="12" cy="12" r="3"/></symbol>
+  <symbol id="i-history" viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></symbol>
+  <symbol id="i-mouse-pointer-2" viewBox="0 0 24 24"><path d="M4.037 4.688a.495.495 0 0 1 .651-.651l16 6.5a.5.5 0 0 1-.063.947l-6.124 1.58a2 2 0 0 0-1.438 1.435l-1.579 6.126a.5.5 0 0 1-.947.063z"/></symbol>
+  <symbol id="i-square" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/></symbol>
+  <symbol id="i-circle" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/></symbol>
+  <symbol id="i-arrow-up-right" viewBox="0 0 24 24"><path d="M7 7h10v10"/><path d="M7 17 17 7"/></symbol>
+  <symbol id="i-minus" viewBox="0 0 24 24"><path d="M5 12h14"/></symbol>
+  <symbol id="i-pencil" viewBox="0 0 24 24"><path d="M21.174 6.812a1 1 0 0 0-3.986-3.987L3.842 16.174a2 2 0 0 0-.5.83l-1.321 4.352a.5.5 0 0 0 .623.622l4.353-1.32a2 2 0 0 0 .83-.497z"/><path d="m15 5 4 4"/></symbol>
+  <symbol id="i-type" viewBox="0 0 24 24"><polyline points="4 7 4 4 20 4 20 7"/><line x1="9" x2="15" y1="20" y2="20"/><line x1="12" x2="12" y1="4" y2="20"/></symbol>
+  <symbol id="i-highlighter" viewBox="0 0 24 24"><path d="m9 11-6 6v3h9l3-3"/><path d="m22 12-4.6 4.6a2 2 0 0 1-2.8 0l-5.2-5.2a2 2 0 0 1 0-2.8L14 4"/></symbol>
+  <symbol id="i-grid-3x3" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="3" rx="2"/><path d="M3 9h18"/><path d="M3 15h18"/><path d="M9 3v18"/><path d="M15 3v18"/></symbol>
+  <symbol id="i-focus" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/></symbol>
+  <symbol id="i-circle-dot" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><circle cx="12" cy="12" r="1"/></symbol>
+  <symbol id="i-crop" viewBox="0 0 24 24"><path d="M6 2v14a2 2 0 0 0 2 2h14"/><path d="M18 22V8a2 2 0 0 0-2-2H2"/></symbol>
+  <symbol id="i-image-plus" viewBox="0 0 24 24"><path d="M16 5h6"/><path d="M19 2v6"/><path d="M21 11.5V19a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7.5"/><path d="m21 15-3.086-3.086a2 2 0 0 0-2.828 0L6 21"/><circle cx="9" cy="9" r="2"/></symbol>
+  <symbol id="i-frame" viewBox="0 0 24 24"><line x1="22" x2="2" y1="6" y2="6"/><line x1="22" x2="2" y1="18" y2="18"/><line x1="6" x2="6" y1="2" y2="22"/><line x1="18" x2="18" y1="2" y2="22"/></symbol>
+  <symbol id="i-undo-2" viewBox="0 0 24 24"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 5.5 5.5a5.5 5.5 0 0 1-5.5 5.5H11"/></symbol>
+  <symbol id="i-redo-2" viewBox="0 0 24 24"><path d="m15 14 5-5-5-5"/><path d="M20 9H9.5A5.5 5.5 0 0 0 4 14.5A5.5 5.5 0 0 0 9.5 20H13"/></symbol>
+  <symbol id="i-download" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" x2="12" y1="15" y2="3"/></symbol>
+  <symbol id="i-terminal" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></symbol>
+  <symbol id="i-upload" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" x2="12" y1="3" y2="15"/></symbol>
+  <symbol id="i-pin" viewBox="0 0 24 24"><path d="M12 17v5"/><path d="M9 10.76a2 2 0 0 1-1.11 1.79l-1.78.9A2 2 0 0 0 5 15.24V16a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1v-.76a2 2 0 0 0-1.11-1.79l-1.78-.9A2 2 0 0 1 15 10.76V7a1 1 0 0 1 1-1 2 2 0 0 0 0-4H8a2 2 0 0 0 0 4 1 1 0 0 1 1 1z"/></symbol>
+  <symbol id="i-keyboard" viewBox="0 0 24 24"><path d="M10 8h.01"/><path d="M12 12h.01"/><path d="M14 8h.01"/><path d="M16 12h.01"/><path d="M18 8h.01"/><path d="M6 8h.01"/><path d="M7 16h10"/><path d="M8 12h.01"/><rect width="20" height="16" x="2" y="4" rx="2"/></symbol>
+  <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+  <symbol id="i-triangle-alert" viewBox="0 0 24 24"><path d="m21.73 18-8-14a2 2 0 0 0-3.48 0l-8 14A2 2 0 0 0 4 21h16a2 2 0 0 0 1.73-3"/><path d="M12 9v4"/><path d="M12 17h.01"/></symbol>
+  <symbol id="i-book-open" viewBox="0 0 24 24"><path d="M12 7v14"/><path d="M3 18a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h5a4 4 0 0 1 4 4 4 4 0 0 1 4-4h5a1 1 0 0 1 1 1v13a1 1 0 0 1-1 1h-6a3 3 0 0 0-3 3 3 3 0 0 0-3-3z"/></symbol>
+  <symbol id="i-cpu" viewBox="0 0 24 24"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9" rx="1"/><path d="M15 2v2"/><path d="M15 20v2"/><path d="M2 15h2"/><path d="M2 9h2"/><path d="M20 15h2"/><path d="M20 9h2"/><path d="M9 2v2"/><path d="M9 20v2"/></symbol>
+  <symbol id="i-layers" viewBox="0 0 24 24"><path d="M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z"/><path d="M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12"/><path d="M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17"/></symbol>
+  <symbol id="i-clipboard-copy" viewBox="0 0 24 24"><rect width="8" height="4" x="8" y="2" rx="1" ry="1"/><path d="M8 4H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2"/><path d="M16 4h2a2 2 0 0 1 2 2v4"/><path d="M21 14H11"/><path d="m15 10-4 4 4 4"/></symbol>
+  <symbol id="i-chevron-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+  <symbol id="i-chevron-down" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+  <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2"/><path d="M12 20v2"/><path d="m4.93 4.93 1.41 1.41"/><path d="m17.66 17.66 1.41 1.41"/><path d="M2 12h2"/><path d="M20 12h2"/><path d="m6.34 17.66-1.41 1.41"/><path d="m19.07 4.93-1.41 1.41"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/></symbol>
+  <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+  <symbol id="i-folder-open" viewBox="0 0 24 24"><path d="m6 14 1.5-2.9A2 2 0 0 1 9.24 10H20a2 2 0 0 1 1.94 2.5l-1.54 6a2 2 0 0 1-1.95 1.5H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h3.9a2 2 0 0 1 1.69.9l.81 1.2a2 2 0 0 0 1.67.9H18a2 2 0 0 1 2 2v2"/></symbol>
+  <symbol id="i-minimize" viewBox="0 0 24 24"><path d="M8 3v3a2 2 0 0 1-2 2H3"/><path d="M21 8h-3a2 2 0 0 1-2-2V3"/><path d="M3 16h3a2 2 0 0 1 2 2v3"/><path d="M16 21v-3a2 2 0 0 1 2-2h3"/></symbol>
+  <symbol id="i-qr-code" viewBox="0 0 24 24"><rect width="5" height="5" x="3" y="3" rx="1"/><rect width="5" height="5" x="16" y="3" rx="1"/><rect width="5" height="5" x="3" y="16" rx="1"/><path d="M21 16h-3a2 2 0 0 0-2 2v3"/><path d="M21 21v.01"/><path d="M12 7v3a2 2 0 0 1-2 2H7"/><path d="M3 12h.01"/><path d="M12 3h.01"/><path d="M12 16v.01"/><path d="M16 12h1"/><path d="M21 12v.01"/><path d="M12 21v-1"/></symbol>
+  <symbol id="i-package" viewBox="0 0 24 24"><path d="M11 21.73a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73z"/><path d="M12 22V12"/><polyline points="3.29 7 12 12 20.71 7"/><path d="m7.5 4.27 9 5.15"/></symbol>
+  <symbol id="i-git-branch" viewBox="0 0 24 24"><line x1="6" x2="6" y1="3" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/></symbol>
+  <symbol id="i-github" viewBox="0 0 24 24"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></symbol>
+</svg>
+
+<header class="site-head">
+  <div class="wrap head-inner">
+    <a class="brand" href="#top">
+      <svg class="brand-mark" viewBox="0 0 512 512" aria-hidden="true">
+        <defs><linearGradient id="bg" x1="0" y1="0" x2="512" y2="512" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="#4d7ef0"/><stop offset="1" stop-color="#2f5cc4"/></linearGradient></defs>
+        <rect width="512" height="512" rx="112" fill="url(#bg)"/>
+        <g transform="translate(106,106) scale(12.5)" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><path d="m14.31 8 5.74 9.94"/><path d="M9.69 8h11.48"/><path d="m7.38 12 5.74-9.94"/><path d="M9.69 16 3.95 6.06"/><path d="M14.31 16H2.83"/><path d="m16.62 12-5.74 9.94"/>
+        </g>
+      </svg>
+      SlickShot
+    </a>
+    <nav class="head-nav">
+      <a href="#capture">Capture</a>
+      <a href="#editor">Editor</a>
+      <a href="#extract">Extract</a>
+      <a href="#cli">CLI</a>
+      <a href="#platforms">Platforms</a>
+      <a href="#install">Install</a>
+    </nav>
+    <div class="head-actions">
+      <button class="btn btn-icon" id="theme-toggle" type="button" aria-label="Switch to light theme">
+        <svg class="ic ic-sm" id="theme-icon" aria-hidden="true"><use href="#i-sun"/></svg>
+      </button>
+      <a class="btn" href="https://github.com/tuanpham-dev/slickshot">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-github"/></svg>
+        GitHub
+      </a>
+    </div>
+  </div>
+</header>
+
+<main id="top">
+
+<!-- ============================ HERO ============================ -->
+<section class="hero">
+  <div class="wrap">
+    <div class="selection" id="selection">
+      <span class="rule rule-t"></span><span class="rule rule-b"></span>
+      <span class="rule rule-l"></span><span class="rule rule-r"></span>
+      <svg class="ants" aria-hidden="true" preserveAspectRatio="none"><rect x="0" y="0" width="100%" height="100%" rx="2"/></svg>
+      <span class="handle tl"></span><span class="handle tr"></span>
+      <span class="handle bl"></span><span class="handle br"></span>
+      <span class="dim" id="dim">960 × 420</span>
+
+      <h1>The screenshot tool that finishes the job.</h1>
+      <p class="lede">Drag a region, annotate it, pull the text out of it, and put it on the clipboard, in a folder, or on the web &mdash; without ever leaving the capture.</p>
+      <div class="hero-cta">
+        <a class="btn btn-primary btn-lg" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
+          Download the latest release
+        </a>
+        <a class="btn btn-lg" href="#install">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-git-branch"/></svg>
+          Build from source
+        </a>
+      </div>
+      <div class="hero-meta">
+        <span><svg class="ic ic-sm" aria-hidden="true"><use href="#i-package"/></svg>Tauri&nbsp;2 + React + Rust</span>
+        <span><svg class="ic ic-sm" aria-hidden="true"><use href="#i-cpu"/></svg>On-device OCR</span>
+        <span><svg class="ic ic-sm" aria-hidden="true"><use href="#i-terminal"/></svg>The binary is also a CLI</span>
+        <span><svg class="ic ic-sm" aria-hidden="true"><use href="#i-monitor"/></svg>Linux &middot; Windows &middot; macOS</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ CAPTURE ============================ -->
+<section class="band" id="capture">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">capture</span>
+      <h2>Eight ways to grab the screen.</h2>
+      <p class="lede">Every mode is one tile in a 480&times;640 window, or one global hotkey away with the window never opening at all. Region selection can span monitors, and handles per-monitor scaling instead of assuming one desktop scale factor.</p>
+    </div>
+
+    <div class="capture-layout">
+      <!-- main window recreation -->
+      <div class="frame appwin" role="img" aria-label="The SlickShot main window: a grid of capture-mode tiles, a delay selector, and the save folder.">
+        <div class="frame-bar" aria-hidden="true">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="frame-title">SlickShot</span>
+        </div>
+        <div class="appwin-body" aria-hidden="true">
+          <div class="appwin-head">
+            <strong>SlickShot</strong>
+            <div style="display:flex;gap:2px">
+              <span class="iconbtn"><svg class="ic ic-sm"><use href="#i-history"/></svg></span>
+              <span class="iconbtn"><svg class="ic ic-sm"><use href="#i-settings"/></svg></span>
+            </div>
+          </div>
+          <div class="tiles">
+            <div class="tile"><svg class="ic ic-lg"><use href="#i-camera"/></svg><b>Region</b><span class="key">PrintScreen</span></div>
+            <div class="tile"><svg class="ic ic-lg"><use href="#i-maximize"/></svg><b>Screen</b><span class="key">Shift+PrintScreen</span></div>
+            <div class="tile"><svg class="ic ic-lg"><use href="#i-app-window"/></svg><b>Window</b><span class="key">Ctrl+PrintScreen</span></div>
+            <div class="tile"><svg class="ic ic-lg"><use href="#i-monitor"/></svg><b>Monitor</b><span class="key">Pick&hellip;</span></div>
+            <div class="tile tile-wide"><svg class="ic"><use href="#i-languages"/></svg><b>Translate/Extract text</b><span class="key">Ctrl+Shift+PrintScreen</span></div>
+            <div class="tile tile-half"><svg class="ic"><use href="#i-repeat"/></svg><b>Repeat region</b></div>
+            <div class="tile tile-half"><svg class="ic"><use href="#i-pipette"/></svg><b>Pick color</b></div>
+            <div class="tile tile-wide"><svg class="ic"><use href="#i-ruler"/></svg><b>Measure</b></div>
+          </div>
+          <div class="tile tile-wide" style="grid-column:auto"><svg class="ic"><use href="#i-image"/></svg><b>Open image&hellip;</b><span class="key">Ctrl+O</span></div>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span style="font-size:12px;color:var(--fg-muted);font-weight:500">Delay</span>
+            <span class="seg"><span>Off</span><span class="on">3s</span><span>5s</span><span>10s</span></span>
+          </div>
+          <div class="appwin-foot">
+            <span>Saves to <code>~/Pictures/Screenshots</code></span>
+            <span style="color:var(--accent)">Change</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- mode explanations -->
+      <div class="mode-list">
+        <div class="mode">
+          <span class="mode-ic"><svg class="ic"><use href="#i-camera"/></svg></span>
+          <div>
+            <h3>Region <kbd>PrintScreen</kbd></h3>
+            <p>Drag a rectangle anywhere, across monitor boundaries if you like. A pixel loupe follows the cursor while you aim, and the selection stays resizable from any edge before you commit.</p>
+          </div>
+        </div>
+        <div class="mode">
+          <span class="mode-ic"><svg class="ic"><use href="#i-maximize"/></svg></span>
+          <div>
+            <h3>Screen, monitor, window <kbd>Shift/Ctrl+PrintScreen</kbd></h3>
+            <p>The whole virtual desktop, one monitor picked by name and resolution, or a single window &mdash; each straight to the editor.</p>
+          </div>
+        </div>
+        <div class="mode">
+          <span class="mode-ic"><svg class="ic"><use href="#i-repeat"/></svg></span>
+          <div>
+            <h3>Repeat region</h3>
+            <p>Re-shoot the exact rectangle you used last time. For capturing the same panel over and over while something changes inside it.</p>
+          </div>
+        </div>
+        <div class="mode">
+          <span class="mode-ic"><svg class="ic"><use href="#i-pipette"/></svg></span>
+          <div>
+            <h3>Pick color</h3>
+            <p>Magnify any pixel on screen and lift its value &mdash; no capture, no editor, straight to the clipboard.</p>
+          </div>
+        </div>
+        <div class="mode">
+          <span class="mode-ic"><svg class="ic"><use href="#i-ruler"/></svg></span>
+          <div>
+            <h3>Measure</h3>
+            <p>Drag a line between two points on screen and read the distance in pixels. For checking spacing against a design without pasting anything anywhere.</p>
+          </div>
+        </div>
+        <div class="mode">
+          <span class="mode-ic"><svg class="ic"><use href="#i-languages"/></svg></span>
+          <div>
+            <h3>Translate / extract text <kbd>Ctrl+Shift+PrintScreen</kbd></h3>
+            <p>Drag over text in an image, a video, or an app that won't let you select it, and get it back as text &mdash; optionally translated. <a href="#extract">More below</a>.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ EDITOR ============================ -->
+<section class="band" id="editor">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">annotate</span>
+      <h2>A real editor, not a doodle pad.</h2>
+      <p class="lede">Fifteen tools with single-key shortcuts, full undo/redo, and a properties panel that follows whatever you have selected. Shapes stay editable after you draw them &mdash; move, restyle, or delete any of them at any point.</p>
+    </div>
+
+    <div class="editor-scroll">
+      <div class="frame editor" role="img" aria-label="The SlickShot annotation editor: a toolbar of fifteen tools, an annotated screenshot on the canvas, a properties panel, and a status bar with export controls.">
+        <div class="frame-bar" aria-hidden="true">
+          <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          <span class="frame-title">region-2026-08-27-14-32.png</span>
+        </div>
+
+        <div class="tools" aria-hidden="true">
+          <span class="tool"><svg class="ic"><use href="#i-mouse-pointer-2"/></svg><span class="tip">Select<b>V</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-square"/></svg><span class="tip">Rectangle<b>R</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-circle"/></svg><span class="tip">Ellipse<b>E</b></span></span>
+          <span class="tool on"><svg class="ic"><use href="#i-arrow-up-right"/></svg><span class="tip">Arrow<b>A</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-minus"/></svg><span class="tip">Line<b>L</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-pencil"/></svg><span class="tip">Freehand<b>P</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-type"/></svg><span class="tip">Text<b>T</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-highlighter"/></svg><span class="tip">Highlighter<b>H</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-grid-3x3"/></svg><span class="tip">Pixelate<b>X</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-focus"/></svg><span class="tip">Spotlight<b>W</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-circle-dot"/></svg><span class="tip">Numbered marker<b>M</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-crop"/></svg><span class="tip">Crop<b>C</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-scan-text"/></svg><span class="tip">Extract text<b>O</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-pipette"/></svg><span class="tip">Pick color<b>I</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-ruler"/></svg><span class="tip">Measure<b>U</b></span></span>
+          <span class="tool-sep"></span>
+          <span class="tool"><svg class="ic"><use href="#i-image-plus"/></svg><span class="tip">Insert image</span></span>
+          <span class="tool"><svg class="ic"><use href="#i-frame"/></svg><span class="tip">Backdrop</span></span>
+          <span class="tool-sep"></span>
+          <span class="tool"><svg class="ic"><use href="#i-undo-2"/></svg><span class="tip">Undo<b>Ctrl+Z</b></span></span>
+          <span class="tool"><svg class="ic"><use href="#i-redo-2"/></svg><span class="tip">Redo<b>Ctrl+Shift+Z</b></span></span>
+        </div>
+
+        <div class="editor-mid">
+          <div class="canvas-pad">
+            <!-- an annotated capture: rectangle, arrow, markers, pixelate, highlighter, text -->
+            <svg viewBox="0 0 640 360" aria-hidden="true">
+              <defs>
+                <marker id="ah" viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse">
+                  <path d="M0 0 10 5 0 10z" fill="#e2685f"/>
+                </marker>
+                <pattern id="mosaic" width="9" height="9" patternUnits="userSpaceOnUse">
+                  <rect width="9" height="9" fill="#4a5060"/><rect width="4.5" height="4.5" fill="#5a6172"/><rect x="4.5" y="4.5" width="4.5" height="4.5" fill="#3f4552"/>
+                </pattern>
+              </defs>
+
+              <!-- the captured app -->
+              <rect width="640" height="360" fill="#f7f8fa"/>
+              <rect width="176" height="360" fill="#eceef2"/>
+              <rect x="20" y="22" width="86" height="9" rx="4.5" fill="#b9bec9"/>
+              <rect x="20" y="56" width="136" height="26" rx="6" fill="#dfe2e9"/>
+              <rect x="20" y="90" width="136" height="26" rx="6" fill="#dfe2e9"/>
+              <rect x="20" y="124" width="136" height="26" rx="6" fill="#cdd3de"/>
+              <rect x="20" y="158" width="136" height="26" rx="6" fill="#dfe2e9"/>
+              <rect x="204" y="26" width="150" height="12" rx="6" fill="#c3c8d2"/>
+              <rect x="204" y="52" width="96" height="8" rx="4" fill="#d7dbe3"/>
+
+              <!-- chart -->
+              <rect x="204" y="88" width="404" height="176" rx="8" fill="#fff" stroke="#e3e6ec"/>
+              <g stroke="#eef0f4"><path d="M220 132h372M220 176h372M220 220h372"/></g>
+              <path d="M220 232 268 208 316 216 364 172 412 186 460 138 508 150 556 112 592 124" fill="none" stroke="#3b6fe0" stroke-width="2.5" stroke-linejoin="round"/>
+              <path d="M220 232 268 208 316 216 364 172 412 186 460 138 508 150 556 112 592 124V264H220z" fill="#3b6fe0" opacity=".09"/>
+              <circle cx="460" cy="138" r="4" fill="#3b6fe0"/>
+
+              <!-- footer row with a redacted address -->
+              <rect x="204" y="288" width="120" height="9" rx="4.5" fill="#d7dbe3"/>
+              <rect x="340" y="284" width="150" height="17" rx="4" fill="url(#mosaic)"/>
+
+              <!-- annotations -->
+              <rect x="196" y="80" width="420" height="192" rx="5" fill="none" stroke="#e2685f" stroke-width="3"/>
+              <path d="M556 60 470 128" stroke="#e2685f" stroke-width="3" fill="none" marker-end="url(#ah)"/>
+              <rect x="196" y="24" width="132" height="20" rx="3" fill="#ffd54a" opacity=".55"/>
+              <text x="560" y="50" font-family="IBM Plex Sans, sans-serif" font-size="15" font-weight="600" fill="#e2685f" text-anchor="end">peak</text>
+              <g font-family="IBM Plex Sans, sans-serif" font-size="13" font-weight="700" fill="#fff">
+                <circle cx="206" cy="88" r="13" fill="#3b6fe0"/><text x="206" y="93" text-anchor="middle">1</text>
+                <circle cx="352" cy="292" r="13" fill="#3b6fe0"/><text x="352" y="297" text-anchor="middle">2</text>
+              </g>
+            </svg>
+          </div>
+
+          <div class="props" aria-hidden="true">
+            <div class="props-head">Arrow</div>
+            <div class="props-body">
+              <div>
+                <span class="prop-label">Color</span>
+                <div class="swatches">
+                  <span class="swatch on" style="background:#e2685f"></span>
+                  <span class="swatch" style="background:#e0a33c"></span>
+                  <span class="swatch" style="background:#3fc178"></span>
+                  <span class="swatch" style="background:#6690f0"></span>
+                  <span class="swatch" style="background:#eef0f3"></span>
+                </div>
+              </div>
+              <div>
+                <span class="prop-label">Stroke width &mdash; 3&nbsp;px</span>
+                <div class="track"><i style="width:34%"></i><b style="left:34%"></b></div>
+              </div>
+              <div>
+                <span class="prop-label">Opacity &mdash; 100%</span>
+                <div class="track"><i style="width:100%"></i><b style="left:100%"></b></div>
+              </div>
+              <div>
+                <span class="prop-label">Arrowhead</span>
+                <span class="seg" style="width:100%"><span class="on" style="flex:1;text-align:center">End</span><span style="flex:1;text-align:center">Both</span></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="editor-foot" aria-hidden="true">
+          <div class="grp">
+            <span>1280 &times; 720</span>
+            <span>612, 248</span>
+            <span class="iconbtn" style="width:24px;height:24px"><svg class="ic ic-sm"><use href="#i-minus"/></svg></span>
+            <span>100%</span>
+            <span class="iconbtn" style="width:24px;height:24px"><svg class="ic ic-sm"><use href="#i-plus"/></svg></span>
+            <span class="iconbtn" style="width:24px;height:24px"><svg class="ic ic-sm"><use href="#i-minimize"/></svg></span>
+          </div>
+          <div class="grp right">
+            <span class="iconbtn" style="width:26px;height:26px"><svg class="ic ic-sm"><use href="#i-folder-open"/></svg></span>
+            <span class="pill-select">100% <svg class="ic ic-sm"><use href="#i-chevron-down"/></svg></span>
+            <span class="iconbtn" style="width:26px;height:26px"><svg class="ic ic-sm"><use href="#i-pin"/></svg></span>
+            <span style="display:inline-flex">
+              <span class="export-btn"><svg class="ic ic-sm"><use href="#i-copy"/></svg>Copy</span>
+              <span class="export-caret"><svg class="ic ic-sm"><use href="#i-chevron-down"/></svg></span>
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="keys">
+      <div>Select <span>V</span></div>
+      <div>Rectangle <span>R</span></div>
+      <div>Ellipse <span>E</span></div>
+      <div>Arrow <span>A</span></div>
+      <div>Line <span>L</span></div>
+      <div>Freehand <span>P</span></div>
+      <div>Text <span>T</span></div>
+      <div>Highlighter <span>H</span></div>
+      <div>Pixelate <span>X</span></div>
+      <div>Spotlight <span>W</span></div>
+      <div>Numbered marker <span>M</span></div>
+      <div>Crop <span>C</span></div>
+      <div>Extract text <span>O</span></div>
+      <div>Pick color <span>I</span></div>
+      <div>Measure <span>U</span></div>
+      <div>Undo <span>Ctrl+Z</span></div>
+      <div>Redo <span>Ctrl+Shift+Z</span></div>
+      <div>Copy <span>Ctrl+C</span></div>
+      <div>Save As&hellip; <span>Ctrl+Shift+S</span></div>
+      <div>Upload <span>Ctrl+U</span></div>
+      <div>Pin to screen <span>Ctrl+P</span></div>
+      <div>Open image&hellip; <span>Ctrl+O</span></div>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-focus"/></svg>
+        <h3>Spotlight</h3>
+        <p>Dims everything outside the shapes you draw, to a darkness you choose. The fastest way to say &ldquo;look here&rdquo; without cropping away the context.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-circle-dot"/></svg>
+        <h3>Numbered markers</h3>
+        <p>Drop 1, 2, 3 as you walk through a flow. Delete one from the middle and the rest renumber themselves.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-frame"/></svg>
+        <h3>Backdrop</h3>
+        <p>Pad the shot with a gradient or solid-colour background from a set of presets &mdash; for slides and release notes where a bare screenshot looks unfinished.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-grid-3x3"/></svg>
+        <h3>Pixelate &amp; highlight</h3>
+        <p>Mosaic over anything that shouldn't ship &mdash; tokens, addresses, customer names &mdash; and swipe a translucent highlighter over what should.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-crop"/></svg>
+        <h3>Crop and inspect</h3>
+        <p>Trim to what matters, then zoom to 100% to check the pixels. The status bar tracks the cursor's position in image coordinates the whole time.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-image-plus"/></svg>
+        <h3>Insert an image</h3>
+        <p>Drop a second image onto the canvas &mdash; a logo, a cursor, another capture &mdash; and move or resize it like any other shape.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ EXTRACT ============================ -->
+<section class="band" id="extract">
+  <div class="wrap">
+    <div class="extract-layout">
+      <div class="sec-head">
+        <span class="eyebrow">extract</span>
+        <h2>Text out of anything on screen.</h2>
+        <p class="lede">Drag over a paused video, a screenshot someone pasted into chat, an error dialog that won't let you select its own message &mdash; and get the text back. QR codes in the same region are decoded in the same pass.</p>
+      </div>
+
+      <div class="frame ocr-panel" role="img" aria-label="The extract-text result popover, showing Original and Translation tabs, the recognised text, a decoded QR code, and Copy text and Listen buttons.">
+        <div class="frame-bar" aria-hidden="true">
+          <span class="frame-title" style="margin-left:0">Extract text &mdash; 412 &times; 96</span>
+        </div>
+        <div class="ocr-body" aria-hidden="true">
+          <div class="ocr-tabs"><span class="on">Original</span><span>Translation</span></div>
+          <p class="ocr-text">Deployment failed: the service account is missing the <code>storage.objects.create</code> permission on bucket <code>prod-assets</code>.</p>
+          <div class="qr-row">
+            <svg class="ic ic-sm"><use href="#i-qr-code"/></svg>
+            <span>https://status.example.com/incident/4192</span>
+          </div>
+          <div class="ocr-actions">
+            <span class="mini-btn primary"><svg class="ic ic-sm"><use href="#i-clipboard-copy"/></svg>Copy text</span>
+            <span class="mini-btn">Listen</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="cards">
+        <div class="card">
+          <svg class="ic ic-lg" aria-hidden="true"><use href="#i-cpu"/></svg>
+          <h3>Native engines, on device</h3>
+          <p>Recognition runs locally on every platform &mdash; nothing is uploaded to read your screen.</p>
+          <ul>
+            <li><b>macOS</b> &mdash; the built-in Vision framework</li>
+            <li><b>Windows</b> &mdash; the built-in Windows.Media.Ocr engine</li>
+            <li><b>Linux</b> &mdash; Tesseract, pulled in as a package dependency by the .deb and .rpm</li>
+          </ul>
+        </div>
+        <div class="card">
+          <svg class="ic ic-lg" aria-hidden="true"><use href="#i-languages"/></svg>
+          <h3>Translation is opt-in</h3>
+          <p>Turn it on in Settings and the result gets a second tab with your target language, plus a Listen button. Both send text to a Google endpoint, which is exactly why they stay off until you ask.</p>
+        </div>
+        <div class="card">
+          <svg class="ic ic-lg" aria-hidden="true"><use href="#i-scan-text"/></svg>
+          <h3>Three ways in</h3>
+          <p>The editor's Extract text tool <kbd>O</kbd>, the main window's Translate/Extract mode, or <code>slickshot ocr file.png</code> from a terminal. Same engine behind all three.</p>
+        </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ EXPORT ============================ -->
+<section class="band" id="export">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">export</span>
+      <h2>Clipboard, disk, or a URL.</h2>
+      <p class="lede">The export button remembers whichever of the four you used last and makes it the default, so the common case is one click or one chord.</p>
+    </div>
+
+    <div class="cards">
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-copy"/></svg>
+        <h3>Four ways out</h3>
+        <p>Copy <kbd>Ctrl+C</kbd> &middot; Save As <kbd>Ctrl+Shift+S</kbd> &middot; Quick save to a fixed folder &middot; Upload <kbd>Ctrl+U</kbd>. Export size scales to 100 / 75 / 50 / 33% of native resolution on the way out.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-upload"/></svg>
+        <h3>Upload with a history</h3>
+        <p>Imgur, any S3-compatible bucket, or catbox.moe. Every upload is logged locally with its link, and providers that support deletion get a one-click delete right from the history.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-pin"/></svg>
+        <h3>Pin to screen</h3>
+        <p>Float the capture as an always-on-top window: drag to move, scroll to resize, <kbd>Esc</kbd> to close. For holding a design over the thing you're building.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-keyboard"/></svg>
+        <h3>Tray and hotkeys</h3>
+        <p>Lives in the tray with global hotkeys for every capture mode. All of them are rebindable in Settings &mdash; including the three that ship unbound.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-image"/></svg>
+        <h3>Open existing images</h3>
+        <p>PNG, JPEG, WebP or BMP from disk go straight into the same editor. Nothing about it needs the file to have come from a capture.</p>
+      </div>
+      <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-layers"/></svg>
+        <h3>Settings that stick</h3>
+        <p>Shortcuts, save folder, format and quality, export scale, theme, OCR and translation languages, upload credentials &mdash; all persisted across restarts.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ CLI ============================ -->
+<section class="band" id="cli">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">cli</span>
+      <h2>The same binary, without the window.</h2>
+      <p class="lede">Non-interactive commands run headless &mdash; no window ever opens, and they work whether or not the app is already running. <code>region</code>, <code>window</code> and <code>open</code> forward to a running instance, or launch one.</p>
+    </div>
+
+    <div class="frame term">
+      <div class="frame-bar" aria-hidden="true">
+        <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+        <span class="frame-title">zsh</span>
+      </div>
+      <div class="term-body">
+<div><span class="p">$</span> <span class="c">slickshot screen -o ~/Pictures/shot.png</span></div>
+<div><span class="o">/home/you/Pictures/shot.png</span></div>
+<div>&nbsp;</div>
+<div><span class="p">$</span> <span class="c">slickshot monitor 0 --stdout</span> <span class="f">| xclip -selection clipboard -t image/png</span></div>
+<div>&nbsp;</div>
+<div><span class="p">$</span> <span class="c">slickshot region --edit</span>          <span class="cm"># drag a region, then annotate it</span></div>
+<div>&nbsp;</div>
+<div><span class="p">$</span> <span class="c">slickshot ocr invoice.png --lang deu</span></div>
+<div><span class="o">Rechnung Nr. 2026-0842</span></div>
+<div>&nbsp;</div>
+<div><span class="p">$</span> <span class="c">slickshot upload shot.png</span></div>
+<div><span class="o">https://files.catbox.moe/8f2k1a.png</span></div>
+      </div>
+    </div>
+
+    <div class="cli-table">
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Command</th><th scope="col">What it does</th></tr>
+          </thead>
+          <tbody>
+            <tr><td><code>slickshot screen</code></td><td>Capture the full virtual screen, headless.</td></tr>
+            <tr><td><code>slickshot monitor &lt;index&gt;</code></td><td>Capture one monitor by index, headless.</td></tr>
+            <tr><td><code>slickshot window --title &lt;text&gt;</code></td><td>Capture the first window whose title matches. Without the flag, opens the interactive picker.</td></tr>
+            <tr><td><code>slickshot region</code></td><td>Interactive region selection. Add <code>--edit</code> to land in the editor.</td></tr>
+            <tr><td><code>slickshot open &lt;file&gt;</code></td><td>Open an existing image in the annotation editor.</td></tr>
+            <tr><td><code>slickshot ocr &lt;file&gt;</code></td><td>Extract text and print it to stdout. <code>--lang</code> picks the recognition language, e.g. <code>deu</code>.</td></tr>
+            <tr><td><code>slickshot qr &lt;file&gt;</code></td><td>Decode QR codes, one payload per line.</td></tr>
+            <tr><td><code>slickshot upload &lt;file&gt;</code></td><td>Upload to the configured host and print the URL.</td></tr>
+            <tr><td><code>slickshot list-monitors</code></td><td>List monitor index, id and geometry.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <p class="lede" style="margin-top:20px;font-size:14.5px">Capture commands share <code>-o</code>, <code>-c</code>, <code>--stdout</code>, <code>--edit</code> and <code>--delay</code>. With none of them set, the capture is quick-saved to your configured folder and the path is printed. Full reference in <a href="https://github.com/tuanpham-dev/slickshot/blob/main/docs/CLI.md">docs/CLI.md</a>.</p>
+  </div>
+</section>
+
+<!-- ============================ PLATFORMS ============================ -->
+<section class="band" id="platforms">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">platforms</span>
+      <h2>Where it runs, honestly.</h2>
+      <p class="lede">One codebase written to cross-platform APIs, and tested on all three desktop platforms. Wayland is the one real gap; the rest is a short list of quirks worth knowing before you install.</p>
+    </div>
+
+    <div class="cli-table" style="margin-top:44px">
+      <div class="tbl-wrap">
+        <table>
+          <thead>
+            <tr><th scope="col">Platform</th><th scope="col">Capture</th><th scope="col">OCR engine</th><th scope="col">Status</th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <td><b>Linux &mdash; X11</b></td>
+              <td>x11rb + xcap</td>
+              <td>Tesseract</td>
+              <td><span class="status ok">Developed and used here</span></td>
+            </tr>
+            <tr>
+              <td><b>Linux &mdash; Wayland</b></td>
+              <td>Not implemented</td>
+              <td>&mdash;</td>
+              <td><span class="status off">Seam ready for a portal backend</span></td>
+            </tr>
+            <tr>
+              <td><b>Windows 10 / 11</b></td>
+              <td>xcap</td>
+              <td>Windows.Media.Ocr</td>
+              <td><span class="status ok">Verified on mixed-DPI dual 4K</span></td>
+            </tr>
+            <tr>
+              <td><b>macOS</b></td>
+              <td>xcap</td>
+              <td>Vision</td>
+              <td><span class="status ok">Verified on macOS 26.5, M1 Pro</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="notes">
+      <div class="note">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-triangle-alert"/></svg>
+        <p><b>Wayland is not implemented.</b> The <code>ScreenCapturer</code> trait is the seam a future xdg-desktop-portal backend plugs into; today only the X11 path exists.</p>
+      </div>
+      <div class="note">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-triangle-alert"/></svg>
+        <p><b>Ctrl+S in the editor does nothing on Linux.</b> WebKitGTK appears to swallow the accelerator before the page sees it. Quick save from the toolbar works; only that one shortcut, only on Linux.</p>
+      </div>
+      <div class="note">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-triangle-alert"/></svg>
+        <p><b>Windows: PrintScreen may already be taken</b> by Snipping Tool or OneDrive. The app tells you when the hotkey can't register &mdash; rebind it in Settings &gt; Shortcuts.</p>
+      </div>
+      <div class="note">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-triangle-alert"/></svg>
+        <p><b>macOS needs Screen Recording permission.</b> Grant it in System Settings &gt; Privacy &amp; Security, or captures come back showing the desktop wallpaper and nothing else. The bundle isn't code-signed yet either, so Gatekeeper will ask you to confirm the first launch.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================ INSTALL ============================ -->
+<section class="band" id="install">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">install</span>
+      <h2>Get SlickShot.</h2>
+      <p class="lede">Every platform is bundled on the Releases page &mdash; CI builds them all from the same tag, so the versions never drift apart. Pick your format below.</p>
+    </div>
+
+    <div class="release-bar">
+      <div>
+        <b>Download the latest release</b>
+        <p>linux x86_64 &amp; arm64 &middot; windows x64 &middot; apple silicon</p>
+      </div>
+      <a class="btn btn-primary btn-lg" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
+        <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
+        Releases
+      </a>
+    </div>
+
+    <div class="install-grid">
+      <div class="pkg">
+        <h3><svg class="ic" aria-hidden="true"><use href="#i-package"/></svg> Debian / Ubuntu</h3>
+        <p class="grow">Grab the <code>.deb</code> for your architecture. It declares <code>tesseract-ocr</code> as a dependency, so OCR works the moment it's installed.</p>
+        <div class="cmd">
+          <pre><span class="p">$ </span>sudo apt install ./slickshot_*.deb</pre>
+          <button class="copy" type="button" data-copy="sudo apt install ./slickshot_*.deb" aria-label="Copy command">
+            <svg class="ic ic-sm cp-ic" aria-hidden="true"><use href="#i-copy"/></svg>
+            <svg class="ic ic-sm ok-ic" aria-hidden="true"><use href="#i-check"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="pkg">
+        <h3><svg class="ic" aria-hidden="true"><use href="#i-package"/></svg> Fedora / RHEL</h3>
+        <p class="grow">The <code>.rpm</code> is built in the same job as the <code>.deb</code>, and pulls in <code>tesseract</code> plus the English language pack.</p>
+        <div class="cmd">
+          <pre><span class="p">$ </span>sudo dnf install ./slickshot-*.rpm</pre>
+          <button class="copy" type="button" data-copy="sudo dnf install ./slickshot-*.rpm" aria-label="Copy command">
+            <svg class="ic ic-sm cp-ic" aria-hidden="true"><use href="#i-copy"/></svg>
+            <svg class="ic ic-sm ok-ic" aria-hidden="true"><use href="#i-check"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="pkg">
+        <h3><svg class="ic" aria-hidden="true"><use href="#i-package"/></svg> AppImage</h3>
+        <p class="grow">Self-contained, so it can't declare dependencies &mdash; install Tesseract yourself if you want OCR. The app detects it's missing and shows the right command for your distro.</p>
+        <div class="cmd">
+          <pre><span class="p">$ </span>chmod +x SlickShot_*.AppImage
+<span class="p">$ </span>./SlickShot_*.AppImage</pre>
+          <button class="copy" type="button" data-copy="chmod +x SlickShot_*.AppImage&#10;./SlickShot_*.AppImage" aria-label="Copy commands">
+            <svg class="ic ic-sm cp-ic" aria-hidden="true"><use href="#i-copy"/></svg>
+            <svg class="ic ic-sm ok-ic" aria-hidden="true"><use href="#i-check"/></svg>
+          </button>
+        </div>
+      </div>
+      <div class="pkg">
+        <h3><svg class="ic" aria-hidden="true"><use href="#i-app-window"/></svg> Windows</h3>
+        <p class="grow">Run the installer &mdash; both an <code>.msi</code> and an <code>.exe</code> are published. OCR uses the engine already in Windows, so there's nothing else to set up.</p>
+        <a class="btn" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
+          Open the Releases page
+        </a>
+      </div>
+      <div class="pkg">
+        <h3><svg class="ic" aria-hidden="true"><use href="#i-cpu"/></svg> macOS</h3>
+        <p class="grow">Open the <code>.dmg</code> and drag SlickShot to Applications. OCR uses the built-in Vision framework &mdash; nothing to install. Grant Screen Recording on first capture.</p>
+        <a class="btn" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
+          <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
+          Open the Releases page
+        </a>
+      </div>
+      <div class="pkg">
+        <h3><svg class="ic" aria-hidden="true"><use href="#i-git-branch"/></svg> Or build it yourself</h3>
+        <p class="grow">Needs Node with pnpm, a Rust toolchain, and your platform's <a href="https://tauri.app/start/prerequisites/">Tauri prerequisites</a>. Bundles land in <code>src-tauri/target/release/bundle/</code>.</p>
+        <div class="cmd">
+          <pre><span class="p">$ </span>git clone https://github.com/tuanpham-dev/slickshot
+<span class="p">$ </span>cd slickshot
+<span class="p">$ </span>pnpm install
+<span class="p">$ </span>pnpm tauri build</pre>
+          <button class="copy" type="button" data-copy="git clone https://github.com/tuanpham-dev/slickshot&#10;cd slickshot&#10;pnpm install&#10;pnpm tauri build" aria-label="Copy commands">
+            <svg class="ic ic-sm cp-ic" aria-hidden="true"><use href="#i-copy"/></svg>
+            <svg class="ic ic-sm ok-ic" aria-hidden="true"><use href="#i-check"/></svg>
+          </button>
+        </div>
+      </div>
+</div>
+  </div>
+</section>
+
+<!-- ============================ DOCS ============================ -->
+<section class="band" id="docs">
+  <div class="wrap">
+    <div class="sec-head">
+      <span class="eyebrow">docs</span>
+      <h2>Read the rest.</h2>
+    </div>
+    <div class="doclinks">
+      <a class="doclink" href="https://github.com/tuanpham-dev/slickshot/blob/main/docs/USAGE.md">
+        <svg class="ic" aria-hidden="true"><use href="#i-book-open"/></svg>
+        <span><b>Usage</b><small>Window, toolbar, export, Settings</small></span>
+        <svg class="ic ic-sm go" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+      </a>
+      <a class="doclink" href="https://github.com/tuanpham-dev/slickshot/blob/main/docs/CLI.md">
+        <svg class="ic" aria-hidden="true"><use href="#i-terminal"/></svg>
+        <span><b>CLI</b><small>Every command and flag</small></span>
+        <svg class="ic ic-sm go" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+      </a>
+      <a class="doclink" href="https://github.com/tuanpham-dev/slickshot/blob/main/docs/ARCHITECTURE.md">
+        <svg class="ic" aria-hidden="true"><use href="#i-layers"/></svg>
+        <span><b>Architecture</b><small>Capture, coordinates, IPC, editor</small></span>
+        <svg class="ic ic-sm go" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+      </a>
+      <a class="doclink" href="https://github.com/tuanpham-dev/slickshot/blob/main/docs/BUILDING.md">
+        <svg class="ic" aria-hidden="true"><use href="#i-package"/></svg>
+        <span><b>Building</b><small>Release bundles and the AppImage fix</small></span>
+        <svg class="ic ic-sm go" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+      </a>
+      <a class="doclink" href="https://github.com/tuanpham-dev/slickshot/releases">
+        <svg class="ic" aria-hidden="true"><use href="#i-download"/></svg>
+        <span><b>Releases</b><small>Every tagged build, all platforms</small></span>
+        <svg class="ic ic-sm go" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+      </a>
+      <a class="doclink" href="https://github.com/tuanpham-dev/slickshot">
+        <svg class="ic" aria-hidden="true"><use href="#i-github"/></svg>
+        <span><b>Source</b><small>tuanpham-dev/slickshot</small></span>
+        <svg class="ic ic-sm go" aria-hidden="true"><use href="#i-chevron-right"/></svg>
+      </a>
+    </div>
+  </div>
+</section>
+
+</main>
+
+<footer class="site-foot">
+  <div class="wrap foot-inner">
+    <a class="brand" href="#top">
+      <svg class="brand-mark" viewBox="0 0 512 512" aria-hidden="true">
+        <rect width="512" height="512" rx="112" fill="#4d7ef0"/>
+        <g transform="translate(106,106) scale(12.5)" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="12" r="10"/><path d="m14.31 8 5.74 9.94"/><path d="M9.69 8h11.48"/><path d="m7.38 12 5.74-9.94"/><path d="M9.69 16 3.95 6.06"/><path d="M14.31 16H2.83"/><path d="m16.62 12-5.74 9.94"/>
+        </g>
+      </svg>
+      SlickShot
+    </a>
+    <span>Built with Tauri&nbsp;2, React and Rust.</span>
+    <div class="foot-links">
+      <a href="https://github.com/tuanpham-dev/slickshot">Source</a>
+      <a href="https://github.com/tuanpham-dev/slickshot/releases">Releases</a>
+      <a href="https://github.com/tuanpham-dev/slickshot/issues">Issues</a>
+    </div>
+  </div>
+</footer>
+
+<script>
+// Theme toggle — mirrors the app's own system / light / dark setting.
+(function () {
+  var root = document.documentElement;
+  var btn = document.getElementById("theme-toggle");
+  var icon = document.getElementById("theme-icon");
+
+  function stored() {
+    try { return localStorage.getItem("slickshot-theme"); } catch (e) { return null; }
+  }
+  function isDark() {
+    var t = root.getAttribute("data-theme");
+    if (t) return t === "dark";
+    return !window.matchMedia("(prefers-color-scheme: light)").matches;
+  }
+  function paint() {
+    var dark = isDark();
+    icon.firstElementChild.setAttribute("href", dark ? "#i-sun" : "#i-moon");
+    btn.setAttribute("aria-label", dark ? "Switch to light theme" : "Switch to dark theme");
+  }
+
+  var saved = stored();
+  if (saved === "light" || saved === "dark") root.setAttribute("data-theme", saved);
+  paint();
+
+  btn.addEventListener("click", function () {
+    var next = isDark() ? "light" : "dark";
+    root.setAttribute("data-theme", next);
+    try { localStorage.setItem("slickshot-theme", next); } catch (e) {}
+    paint();
+  });
+  window.matchMedia("(prefers-color-scheme: light)").addEventListener("change", paint);
+})();
+
+// The hero's dimension badge reports the real size of the selection,
+// the way the capture overlay reports the size of your drag.
+(function () {
+  var sel = document.getElementById("selection");
+  var dim = document.getElementById("dim");
+  var queued = false;
+
+  function measure() {
+    queued = false;
+    var r = sel.getBoundingClientRect();
+    dim.textContent = Math.round(r.width) + " × " + Math.round(r.height);
+  }
+  function schedule() {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(measure);
+  }
+  measure();
+  if (window.ResizeObserver) new ResizeObserver(schedule).observe(sel);
+  else window.addEventListener("resize", schedule);
+})();
+
+// Copy buttons on the install commands.
+(function () {
+  document.querySelectorAll(".copy").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var text = btn.getAttribute("data-copy");
+      var done = function () {
+        btn.classList.add("done");
+        setTimeout(function () { btn.classList.remove("done"); }, 1600);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () {});
+      }
+    });
+  });
+})();
+</script>
+</body>
+</html>
