@@ -22,8 +22,8 @@ A multi-platform screenshot capture and annotation tool built with Tauri 2 + Rea
 - [Usage](docs/USAGE.md) — main window, editor toolbar and shortcuts, export options, Pin to screen, Settings reference
 - [CLI](docs/CLI.md) — capture, OCR, QR, and upload from the terminal
 - [Architecture](docs/ARCHITECTURE.md) — how capture, coordinate handling, the editor, IPC, and the CLI are built
-- [Windows / macOS Test Plan](docs/TESTING.md) — manual verification checklist for the two untested platforms
-- [Building](docs/BUILDING.md) — release bundles, and the AppImage build's known issues + fix
+- [Windows / macOS Test Plan](docs/TESTING.md) — manual verification checklist for Windows and macOS, plus the recorded results of each pass
+- [Building](docs/BUILDING.md) — release bundles, the macOS unsigned-build "is damaged" fix, and the AppImage build's known issues + fix
 
 ## Prerequisites (Linux / Fedora)
 
