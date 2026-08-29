@@ -1577,7 +1577,7 @@ tbody tr:last-child td { border-bottom: 0; }
               <td><b>macOS</b></td>
               <td>xcap</td>
               <td>Vision</td>
-              <td><span class="status ok">Verified on macOS 26.5, M1 Pro</span></td>
+              <td><span class="status ok">Core flows verified, Apple silicon</span></td>
             </tr>
           </tbody>
         </table>
@@ -1599,7 +1599,7 @@ tbody tr:last-child td { border-bottom: 0; }
       </div>
       <div class="note">
         <svg class="ic ic-sm" aria-hidden="true"><use href="#i-triangle-alert"/></svg>
-        <p><b>macOS needs Screen Recording permission.</b> Grant it in System Settings &gt; Privacy &amp; Security, or captures come back showing the desktop wallpaper and nothing else. The bundle isn't code-signed yet either, so Gatekeeper will ask you to confirm the first launch.</p>
+        <p><b>macOS: a downloaded build says "is damaged and can't be opened."</b> It isn't. Release builds aren't code-signed or notarized, and Gatekeeper won't accept an ad-hoc signature on an app carrying a browser's quarantine flag - so it reports damage instead of the usual unidentified-developer prompt. Right-click the app &gt; Open, or clear the flag with <code>xattr -cr</code>.</p>
       </div>
     </div>
   </div>
@@ -1670,7 +1670,14 @@ tbody tr:last-child td { border-bottom: 0; }
       </div>
       <div class="pkg">
         <h3><svg class="ic" aria-hidden="true"><use href="#i-cpu"/></svg> macOS</h3>
-        <p class="grow">Open the <code>.dmg</code> and drag SlickShot to Applications. OCR uses the built-in Vision framework - nothing to install. Grant Screen Recording on first capture.</p>
+        <p class="grow">Open the <code>.dmg</code> and drag SlickShot to Applications. OCR uses the built-in Vision framework, and macOS asks for Screen Recording on the first capture. If the first launch reports the app is damaged, it isn't - the build just isn't notarized. Right-click &gt; Open, or:</p>
+        <div class="cmd">
+          <pre><span class="p">$ </span>xattr -cr /Applications/SlickShot.app</pre>
+          <button class="copy" type="button" data-copy="xattr -cr /Applications/SlickShot.app" aria-label="Copy command">
+            <svg class="ic ic-sm cp-ic" aria-hidden="true"><use href="#i-copy"/></svg>
+            <svg class="ic ic-sm ok-ic" aria-hidden="true"><use href="#i-check"/></svg>
+          </button>
+        </div>
         <a class="btn" href="https://github.com/tuanpham-dev/slickshot/releases/latest">
           <svg class="ic ic-sm" aria-hidden="true"><use href="#i-download"/></svg>
           Open the Releases page
