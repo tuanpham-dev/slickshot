@@ -1,0 +1,64 @@
+# Maintainer: Tuan Pham <tuanpham.developer@gmail.com>
+#
+# Repackages the .deb from the GitHub release rather than building from
+# source: a source build needs the whole Rust toolchain plus Node/pnpm, which
+# is a lot to ask of someone who just wants the app. Submit as `slickshot-bin`
+# to the AUR; a from-source `slickshot` package can live alongside it later.
+#
+# Before publishing:
+#   1. Confirm _debname below matches the actual asset name on the release --
+#      Tauri's deb bundler derives it from productName, so verify against
+#      https://github.com/tuanpham-dev/slickshot/releases rather than trusting
+#      this guess.
+#   2. Run `updpkgsums` to replace the SKIP checksums with real ones.
+#   3. Test in a clean chroot with `extra-x86_64-build`.
+#   4. `makepkg --printsrcinfo > .SRCINFO` -- the AUR rejects pushes without it.
+
+pkgname=slickshot-bin
+_pkgname=slickshot
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Screenshot capture and annotation with on-device OCR, translation, QR decoding and a CLI"
+arch=('x86_64' 'aarch64')
+url="https://github.com/tuanpham-dev/slickshot"
+license=('MIT')
+
+# webkit2gtk-4.1 + gtk3 + libayatana-appindicator are the Tauri 2 runtime;
+# tesseract is what the extract-text/translate features and the `ocr` CLI
+# command shell out to.
+depends=(
+  'webkit2gtk-4.1'
+  'gtk3'
+  'libayatana-appindicator'
+  'tesseract'
+  'tesseract-data-eng'
+)
+optdepends=(
+  'xclip: piping captures out of the CLI with --stdout'
+  'tesseract-data-deu: German text recognition'
+  'tesseract-data-fra: French text recognition'
+  'tesseract-data-jpn: Japanese text recognition'
+)
+provides=("$_pkgname=$pkgver")
+conflicts=("$_pkgname")
+
+_debname_x86_64="SlickShot_${pkgver}_amd64.deb"
+_debname_aarch64="SlickShot_${pkgver}_arm64.deb"
+
+source_x86_64=("${_pkgname}-${pkgver}-x86_64.deb::${url}/releases/download/v${pkgver}/${_debname_x86_64}")
+source_aarch64=("${_pkgname}-${pkgver}-aarch64.deb::${url}/releases/download/v${pkgver}/${_debname_aarch64}")
+
+# Replace with real hashes via `updpkgsums` before submitting.
+sha256sums_x86_64=('SKIP')
+sha256sums_aarch64=('SKIP')
+
+package() {
+  # The .deb payload is already laid out as /usr/bin, /usr/share/... so it
+  # only needs unpacking into $pkgdir wholesale.
+  tar -xf data.tar.gz -C "$pkgdir"
+
+  # Tauri's deb ships no copyright file; the AUR expects the license in the
+  # standard location.
+  install -Dm644 "$pkgdir/usr/share/doc/${_pkgname}/LICENSE" \
+    "$pkgdir/usr/share/licenses/${pkgname}/LICENSE" 2>/dev/null || true
+}

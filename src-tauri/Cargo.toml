@@ -3,6 +3,7 @@ name = "slickshot"
 version = "1.0.0"
 description = "Multi-platform screenshot capture and annotation"
 authors = ["Tuan Pham"]
+license = "MIT"
 edition = "2021"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html

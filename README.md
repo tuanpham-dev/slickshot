@@ -69,3 +69,11 @@ Bundles land in `src-tauri/target/release/bundle/` (`deb/`, `rpm/`, `appimage/`)
 - **Windows** has been verified live (Windows 10 Pro, mixed-DPI dual-4K-monitor setup) — see [Windows / macOS Test Plan](docs/TESTING.md#results--windows-10-pro-19045-2026-08-25) for the full results. Everything tested passed or was fixed, including a Pin-window deadlock (building its webview from inside the triggering IPC call could hang the main thread).
 - **Windows: PrintScreen may be claimed by Snipping Tool or OneDrive** on some setups, preventing the default `PrintScreen` hotkey from registering; the app surfaces this via a Settings banner (`hotkeys:error`) — rebind to something else (e.g. `Ctrl+Alt+S`) in Settings > Shortcuts if that happens.
 - **Windows: `cmd.exe`/PowerShell don't wait for a GUI-subsystem process by default** — running `slickshot.exe <command>` from a script that needs the exit code should use `start /wait` (cmd) or check the process object explicitly (PowerShell), since the shell prompt otherwise returns before the app finishes.
+
+## Packaging
+
+- [`packaging/aur/PKGBUILD`](packaging/aur/PKGBUILD) — Arch Linux `slickshot-bin`, repackaging the release `.deb`. See the header for the pre-submission checklist.
+
+## License
+
+[MIT](LICENSE) © Tuan Pham
