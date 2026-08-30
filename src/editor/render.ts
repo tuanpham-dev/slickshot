@@ -1,4 +1,8 @@
-import type { Shape, SpotlightShape } from "./types";
+import type { ArrowShape, ImgPoint, Shape, SpotlightShape } from "./types";
+import { rotationCenter, rotationOf } from "./types";
+// Shared with the adjustment pipeline so both agree on whether canvas
+// filters can be trusted in this webview.
+import { supportsCanvasFilter } from "./tools/adjust";
 
 export interface RenderOptions {
   baseImage?: CanvasImageSource | null;
@@ -87,6 +91,76 @@ function roundedRectPath(
   ctx.closePath();
 }
 
+
+
+/** Blurs a region of `source` in place on `ctx`.
+ *
+ * A blurred region has to be built on its own canvas and clipped, not blurred
+ * straight onto `ctx`: `ctx.filter` applies to the draw call, so sampling the
+ * neighbouring pixels of a sub-rect would smear the region's own edges into
+ * the surrounding image. Drawing an oversized source area and clipping to the
+ * shape keeps the edge sharp while the interior samples real neighbours.
+ *
+ * Falls back to repeated downscale/upscale (a box-blur approximation) where
+ * `ctx.filter` is unavailable -- visually close enough for a censor, and the
+ * region stays genuinely unreadable either way, which is the actual
+ * requirement. */
+function drawBlurredRegion(
+  ctx: CanvasRenderingContext2D,
+  source: CanvasImageSource,
+  x: number,
+  y: number,
+  w: number,
+  h: number,
+  strength: number,
+) {
+  const left = w < 0 ? x + w : x;
+  const top = h < 0 ? y + h : y;
+  const width = Math.max(1, Math.round(Math.abs(w)));
+  const height = Math.max(1, Math.round(Math.abs(h)));
+  const radius = Math.max(2, strength / 2);
+
+  const layer = document.createElement("canvas");
+  layer.width = width;
+  layer.height = height;
+  const lctx = layer.getContext("2d")!;
+
+  if (supportsCanvasFilter()) {
+    // Pad the sampled area by the blur radius so the edges blend with real
+    // neighbouring pixels instead of the layer's transparent border.
+    const pad = Math.ceil(radius * 3);
+    lctx.filter = `blur(${radius}px)`;
+    lctx.drawImage(
+      source,
+      left - pad,
+      top - pad,
+      width + pad * 2,
+      height + pad * 2,
+      -pad,
+      -pad,
+      width + pad * 2,
+      height + pad * 2,
+    );
+    lctx.filter = "none";
+  } else {
+    const steps = 3;
+    const factor = Math.max(2, Math.round(radius));
+    const small = document.createElement("canvas");
+    small.width = Math.max(1, Math.round(width / factor));
+    small.height = Math.max(1, Math.round(height / factor));
+    const sctx = small.getContext("2d")!;
+    sctx.imageSmoothingEnabled = true;
+    sctx.drawImage(source, left, top, width, height, 0, 0, small.width, small.height);
+    for (let i = 1; i < steps; i++) {
+      sctx.drawImage(small, 0, 0, small.width, small.height);
+    }
+    lctx.imageSmoothingEnabled = true;
+    lctx.drawImage(small, 0, 0, small.width, small.height, 0, 0, width, height);
+  }
+
+  ctx.drawImage(layer, left, top);
+}
+
 /** Paints the single shared dim layer for every spotlight shape: fill the
  * whole canvas, then punch each spotlight's rect back out with
  * `destination-out`. Built on its own canvas because the punch-through has
@@ -130,8 +204,111 @@ function drawArrowHead(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2
   ctx.fill();
 }
 
+/** An open (unfilled) head: two strokes forming a V, rather than a filled
+ * triangle, so the shaft appears to continue through it. */
+function drawOpenHead(ctx: CanvasRenderingContext2D, x1: number, y1: number, x2: number, y2: number, size: number) {
+  const angle = Math.atan2(y2 - y1, x2 - x1);
+  ctx.beginPath();
+  ctx.moveTo(x2 - size * Math.cos(angle - Math.PI / 6), y2 - size * Math.sin(angle - Math.PI / 6));
+  ctx.lineTo(x2, y2);
+  ctx.lineTo(x2 - size * Math.cos(angle + Math.PI / 6), y2 - size * Math.sin(angle + Math.PI / 6));
+  ctx.stroke();
+}
+
+/** The point on a quadratic curve at `t`, and the direction it's heading --
+ * the head has to be angled along the curve's own tangent, not along the
+ * straight line between the endpoints, or a strongly curved arrow points
+ * visibly wide of where it lands. */
+function quadraticAt(
+  p0: ImgPoint,
+  c: ImgPoint,
+  p1: ImgPoint,
+  t: number,
+): { x: number; y: number; dx: number; dy: number } {
+  const mt = 1 - t;
+  return {
+    x: mt * mt * p0.x + 2 * mt * t * c.x + t * t * p1.x,
+    y: mt * mt * p0.y + 2 * mt * t * c.y + t * t * p1.y,
+    dx: 2 * mt * (c.x - p0.x) + 2 * t * (p1.x - c.x),
+    dy: 2 * mt * (c.y - p0.y) + 2 * t * (p1.y - c.y),
+  };
+}
+
+/** Draws the shaft and returns, for each end, a point just "behind" it along
+ * the shaft -- the reference the head angles itself against. Straight shafts
+ * use the opposite endpoint; curved ones use the local tangent. */
+function drawArrowShaft(ctx: CanvasRenderingContext2D, s: ArrowShape): { from: ImgPoint; to: ImgPoint } {
+  const start = { x: s.x1, y: s.y1 };
+  const end = { x: s.x2, y: s.y2 };
+  ctx.beginPath();
+  ctx.moveTo(start.x, start.y);
+  if (!s.curve) {
+    ctx.lineTo(end.x, end.y);
+    ctx.stroke();
+    return { from: start, to: end };
+  }
+  ctx.quadraticCurveTo(s.curve.x, s.curve.y, end.x, end.y);
+  ctx.stroke();
+  const atEnd = quadraticAt(start, s.curve, end, 1);
+  const atStart = quadraticAt(start, s.curve, end, 0);
+  return {
+    // Points *behind* each tip along the curve, so `drawArrowHead`'s
+    // atan2(to - from) yields the tangent direction at that tip.
+    from: { x: end.x - atEnd.dx, y: end.y - atEnd.dy },
+    to: { x: start.x + atStart.dx, y: start.y + atStart.dy },
+  };
+}
+
+/** The banner *shaft*: a solid wedge that widens from the tail toward the
+ * tip. Filled rather than stroked, so `strokeWidth` reads as its thickness.
+ *
+ * Only the shaft -- the head is drawn separately by the usual head routines,
+ * which is what lets a banner carry any head style (or none). */
+function drawBannerShaft(ctx: CanvasRenderingContext2D, s: ArrowShape, headLen: number) {
+  const angle = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
+  const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
+  if (len < 1) return;
+  const tailHalf = s.strokeWidth * 0.35;
+  const tipHalf = s.strokeWidth * 1.1;
+  const nx = -Math.sin(angle);
+  const ny = Math.cos(angle);
+  // Stop short of the tip so a head sits on the end of the shaft rather
+  // than on top of it; with no head the shaft runs the whole length.
+  const stop = Math.max(0, len - headLen * 0.6);
+  const ex = s.x1 + Math.cos(angle) * stop;
+  const ey = s.y1 + Math.sin(angle) * stop;
+
+  ctx.beginPath();
+  ctx.moveTo(s.x1 + nx * tailHalf, s.y1 + ny * tailHalf);
+  ctx.lineTo(ex + nx * tipHalf, ey + ny * tipHalf);
+  ctx.lineTo(ex - nx * tipHalf, ey - ny * tipHalf);
+  ctx.lineTo(s.x1 - nx * tailHalf, s.y1 - ny * tailHalf);
+  ctx.closePath();
+  ctx.fill();
+}
+
+/** A swallowtail notch at the arrow's tail. */
+function drawTail(ctx: CanvasRenderingContext2D, s: ArrowShape, size: number) {
+  const angle = Math.atan2(s.y2 - s.y1, s.x2 - s.x1);
+  ctx.beginPath();
+  ctx.moveTo(s.x1, s.y1);
+  ctx.lineTo(s.x1 + size * Math.cos(angle - Math.PI / 4), s.y1 + size * Math.sin(angle - Math.PI / 4));
+  ctx.moveTo(s.x1, s.y1);
+  ctx.lineTo(s.x1 + size * Math.cos(angle + Math.PI / 4), s.y1 + size * Math.sin(angle + Math.PI / 4));
+  ctx.stroke();
+}
+
 function drawShape(ctx: CanvasRenderingContext2D, s: Shape, opts: RenderOptions) {
   ctx.save();
+  // Rotation is applied as a transform around the shape's own center, so
+  // every case below keeps drawing in unrotated coordinates.
+  const rotation = rotationOf(s);
+  if (rotation !== 0) {
+    const c = rotationCenter(s);
+    ctx.translate(c.x, c.y);
+    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.translate(-c.x, -c.y);
+  }
   switch (s.kind) {
     case "rect": {
       ctx.lineWidth = s.strokeWidth;
@@ -166,26 +343,36 @@ function drawShape(ctx: CanvasRenderingContext2D, s: Shape, opts: RenderOptions)
       ctx.stroke();
       break;
     }
-    case "line": {
-      ctx.lineWidth = s.strokeWidth;
-      ctx.strokeStyle = s.stroke;
-      ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(s.x1, s.y1);
-      ctx.lineTo(s.x2, s.y2);
-      ctx.stroke();
-      break;
-    }
     case "arrow": {
       ctx.lineWidth = s.strokeWidth;
       ctx.strokeStyle = s.stroke;
       ctx.fillStyle = s.stroke;
       ctx.lineCap = "round";
-      ctx.beginPath();
-      ctx.moveTo(s.x1, s.y1);
-      ctx.lineTo(s.x2, s.y2);
-      ctx.stroke();
-      drawArrowHead(ctx, s.x1, s.y1, s.x2, s.y2, 10 + s.strokeWidth * 2);
+      ctx.lineJoin = "round";
+      const style = s.style ?? "single";
+      const head = 10 + s.strokeWidth * 2;
+
+      // A banner shaft is always straight: tapering along a curve would need
+      // offset-curve math well beyond what the shape earns, so a curved
+      // arrow falls back to the stroked shaft.
+      const banner = s.banner === true && !s.curve;
+      const { from, to } = banner
+        ? (drawBannerShaft(ctx, s, style === "none" ? 0 : head),
+          { from: { x: s.x1, y: s.y1 }, to: { x: s.x2, y: s.y2 } })
+        : drawArrowShaft(ctx, s);
+      // A headless arrow is a plain line -- the shaft is the whole shape.
+      if (style === "none") break;
+      if (style === "open") {
+        drawOpenHead(ctx, from.x, from.y, s.x2, s.y2, head);
+      } else {
+        drawArrowHead(ctx, from.x, from.y, s.x2, s.y2, head);
+      }
+      if (style === "double") {
+        drawArrowHead(ctx, to.x, to.y, s.x1, s.y1, head);
+      }
+      if (style === "tail") {
+        drawTail(ctx, s, head * 0.7);
+      }
       break;
     }
     case "freehand": {
@@ -208,18 +395,27 @@ function drawShape(ctx: CanvasRenderingContext2D, s: Shape, opts: RenderOptions)
       break;
     }
     case "pixelate": {
-      if (opts.baseImage) {
-        const block = Math.max(4, s.blockSize);
-        const tmp = document.createElement("canvas");
-        tmp.width = Math.max(1, Math.round(s.w / block));
-        tmp.height = Math.max(1, Math.round(s.h / block));
-        const tmpCtx = tmp.getContext("2d")!;
-        tmpCtx.imageSmoothingEnabled = true;
-        tmpCtx.drawImage(opts.baseImage, s.x, s.y, s.w, s.h, 0, 0, tmp.width, tmp.height);
-        ctx.imageSmoothingEnabled = false;
-        ctx.drawImage(tmp, 0, 0, tmp.width, tmp.height, s.x, s.y, s.w, s.h);
-        ctx.imageSmoothingEnabled = true;
+      const mode = s.mode ?? "pixelate";
+      if (mode === "solid") {
+        ctx.fillStyle = s.color ?? "#000000";
+        ctx.fillRect(s.x, s.y, s.w, s.h);
+        break;
       }
+      if (!opts.baseImage) break;
+      const block = Math.max(4, s.blockSize);
+      if (mode === "blur") {
+        drawBlurredRegion(ctx, opts.baseImage, s.x, s.y, s.w, s.h, block);
+        break;
+      }
+      const tmp = document.createElement("canvas");
+      tmp.width = Math.max(1, Math.round(s.w / block));
+      tmp.height = Math.max(1, Math.round(s.h / block));
+      const tmpCtx = tmp.getContext("2d")!;
+      tmpCtx.imageSmoothingEnabled = true;
+      tmpCtx.drawImage(opts.baseImage, s.x, s.y, s.w, s.h, 0, 0, tmp.width, tmp.height);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmp, 0, 0, tmp.width, tmp.height, s.x, s.y, s.w, s.h);
+      ctx.imageSmoothingEnabled = true;
       break;
     }
     case "spotlight":
@@ -231,17 +427,73 @@ function drawShape(ctx: CanvasRenderingContext2D, s: Shape, opts: RenderOptions)
       break;
     }
     case "text": {
-      ctx.font = `600 ${s.fontSize}px Inter, sans-serif`;
+      // Weight 600 is the original, unbolded look; the bold toggle steps up
+      // to 700 rather than making unbolded text lighter than it has been.
+      const weight = s.bold ? 700 : 600;
+      const slant = s.italic ? "italic " : "";
+      ctx.font = `${slant}${weight} ${s.fontSize}px Inter, sans-serif`;
       ctx.textBaseline = "top";
+      ctx.textAlign = "left";
       const lines = s.text.split("\n");
       const lineHeight = s.fontSize * 1.3;
-      if (s.background) {
-        const widest = Math.max(0, ...lines.map((l) => ctx.measureText(l).width));
-        ctx.fillStyle = "rgba(0,0,0,0.6)";
+      const widths = lines.map((l) => ctx.measureText(l).width);
+      const widest = Math.max(0, ...widths);
+      const align = s.align ?? "left";
+      // Each line is offset within the block's own width, so alignment is
+      // relative to the longest line rather than to the whole image.
+      const offsetFor = (i: number) =>
+        align === "center" ? (widest - widths[i]) / 2 : align === "right" ? widest - widths[i] : 0;
+
+      const bg = s.bgColor !== undefined ? s.bgColor : s.background ? "rgba(0,0,0,0.6)" : null;
+      if (bg) {
+        ctx.fillStyle = bg;
         ctx.fillRect(s.x - 4, s.y - 2, widest + 8, lineHeight * lines.length);
       }
+
       ctx.fillStyle = s.color;
-      lines.forEach((line, i) => ctx.fillText(line, s.x, s.y + i * lineHeight));
+      lines.forEach((line, i) => {
+        const x = s.x + offsetFor(i);
+        const y = s.y + i * lineHeight;
+        ctx.fillText(line, x, y);
+        if (s.underline && line.length > 0) {
+          // Canvas has no underline, so it's drawn: just under the baseline,
+          // thickness scaled off the font size so it holds up when zoomed.
+          const thickness = Math.max(1, s.fontSize / 14);
+          ctx.fillRect(x, y + s.fontSize * 1.05, widths[i], thickness);
+        }
+      });
+      break;
+    }
+    case "stamp": {
+      // Emoji render through the system emoji font; where none is installed
+      // the glyphs fall back to monochrome, which still reads correctly.
+      ctx.font = `${s.size}px "Noto Color Emoji", "Apple Color Emoji", "Segoe UI Emoji", sans-serif`;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(s.emoji, s.x, s.y);
+      break;
+    }
+    case "loupe": {
+      if (!opts.baseImage) break;
+      ctx.save();
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.clip();
+      // Draw the whole image scaled about the lens center, so the pixels
+      // under the lens stay put while everything around them magnifies out
+      // of the clip region.
+      ctx.translate(s.x, s.y);
+      ctx.scale(s.factor, s.factor);
+      ctx.translate(-s.x, -s.y);
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(opts.baseImage, 0, 0);
+      ctx.restore();
+
+      ctx.lineWidth = s.strokeWidth;
+      ctx.strokeStyle = s.stroke;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.stroke();
       break;
     }
     case "marker": {

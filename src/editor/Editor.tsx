@@ -2,7 +2,18 @@ import { useEffect, useRef, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { Copy, Save, FolderOpen, UploadCloud, Pin, ChevronDown, X, Check, Loader2 } from "lucide-react";
+import {
+  Copy,
+  Save,
+  FolderOpen,
+  UploadCloud,
+  ChevronDown,
+  X,
+  Check,
+  Loader2,
+  Undo2,
+  Redo2,
+} from "lucide-react";
 import {
   fetchShotImage,
   editorHide,
@@ -12,6 +23,9 @@ import {
   exportPrepare,
   exportCommit,
   ocrExtract,
+  ocrBoxes,
+  detectFaces,
+  type OcrWordBox,
   qrDecode,
   translateText,
   translateServiceAvailable,
@@ -20,7 +34,6 @@ import {
   ocrEngineStatus,
   type OcrEngineStatus,
   getSettings,
-  setSettings,
   uploadImage,
   pinEditorImage,
   copyTextToClipboard,
@@ -37,6 +50,8 @@ import { Toolbar } from "./Toolbar";
 import { PropertiesPanel } from "./PropertiesPanel";
 import { StatusBar } from "./StatusBar";
 import { flattenToPng } from "./export";
+import { findPii } from "./tools/redact";
+import { applyAdjustments } from "./tools/adjust";
 import { useToast } from "../ui/Toast";
 import { ConfirmDialog } from "../ui/Dialog";
 import { Button } from "../ui/Button";
@@ -46,8 +61,6 @@ import { OcrMissingDialog } from "../ui/OcrMissingDialog";
 import { DropdownMenu } from "radix-ui";
 import { moveShape } from "./tools/select";
 import { createImageShape } from "./tools/image";
-import { Select } from "../ui/Select";
-import { Tooltip } from "../ui/Tooltip";
 import type { ImgPoint, ToolId } from "./types";
 import { COLOR_FORMATS, formatColor, measurementLabel, type Rgb } from "../lib/color";
 import { PixelLoupe, SAMPLE_PX } from "../ui/PixelLoupe";
@@ -89,6 +102,15 @@ function computeFitZoom(container: HTMLElement, imageWidth: number, imageHeight:
 type ExportDefaultAction = "clipboard" | "save" | "quicksave" | "upload";
 const EXPORT_DEFAULT_STORAGE_KEY = "slickshot:exportDefaultAction";
 
+const SNAP_TO_TEXT_STORAGE_KEY = "slickshot:highlightSnapToText";
+
+/** The highlighter's snap preference persists across captures, in
+ * localStorage rather than settings -- it's a per-tool habit, and routing it
+ * through `set_settings` would re-register every hotkey on each toggle. */
+function loadSnapToText(): boolean {
+  return localStorage.getItem(SNAP_TO_TEXT_STORAGE_KEY) === "true";
+}
+
 function loadExportDefaultAction(): ExportDefaultAction {
   const stored = localStorage.getItem(EXPORT_DEFAULT_STORAGE_KEY);
   return stored === "save" || stored === "quicksave" || stored === "upload" ? stored : "clipboard";
@@ -110,6 +132,8 @@ const SHORTCUT_TOOLS: Record<string, ToolId> = {
   o: "ocr",
   i: "eyedropper",
   u: "measure",
+  g: "stamp",
+  z: "loupe",
 };
 
 export function Editor({ params }: EditorProps) {
@@ -140,6 +164,12 @@ export function Editor({ params }: EditorProps) {
   const [ocrStatus, setOcrStatus] = useState<OcrEngineStatus | null>(null);
   const [ocrMissingOpen, setOcrMissingOpen] = useState(false);
   const lastOcrRectRef = useRef<PhysRect | null>(null);
+  const [redacting, setRedacting] = useState(false);
+  const [snapToText, setSnapToTextState] = useState(loadSnapToText);
+  // Word boxes handed to Canvas for highlight snapping. Null until they land,
+  // which keeps drags freeform rather than blocking on OCR.
+  const [textBoxes, setTextBoxes] = useState<OcrWordBox[] | null>(null);
+  const wordBoxesRef = useRef<{ imageId: string | null; boxes: OcrWordBox[] } | null>(null);
   // Checked once whenever the "Extract text" tool is (re-)activated -- see
   // the `tool === "ocr"` effect below -- not per drag-selected region.
   // Defaults to true so the first region after activating isn't held back
@@ -162,15 +192,17 @@ export function Editor({ params }: EditorProps) {
     cropRect,
     measureLine,
     backdrop,
-    exportScale,
+    adjustments,
+    resize,
     setImage,
     setTool,
     setStyle,
     setBackdrop,
-    setExportScale,
+    setResize,
     undo,
     redo,
     addShape,
+    addShapes,
     removeShape,
     duplicateSelected,
     updateShape,
@@ -179,6 +211,10 @@ export function Editor({ params }: EditorProps) {
     applyCrop,
     setOcrRect,
     setMeasureLine,
+    setAdjustments,
+    flipImage,
+    adjustOpen,
+    setAdjustOpen,
   } = useEditorStore();
 
   useEffect(() => {
@@ -405,14 +441,23 @@ export function Editor({ params }: EditorProps) {
     }
   }, [tool]);
 
-  // The export scale lives in settings so it survives a restart, but the
-  // store owns it during a session. Read fresh per capture (this window is
-  // pre-warmed and reused) rather than once at mount.
+  // The saved default scale seeds the resize for each new capture, so a
+  // standing "always export at 50%" preference still applies -- but from
+  // then on the Adjust panel edits real pixel dimensions. Read fresh per
+  // capture, since this window is pre-warmed and reused.
   useEffect(() => {
+    if (!imageWidth || !imageHeight) return;
     getSettings()
-      .then((s) => setExportScale(s.export_scale))
+      .then((s) => {
+        const percent = s.export_scale;
+        setResize(
+          percent === 100
+            ? null
+            : { w: Math.round((imageWidth * percent) / 100), h: Math.round((imageHeight * percent) / 100) },
+        );
+      })
       .catch(() => {});
-  }, [imageId, setExportScale]);
+  }, [imageId, imageWidth, imageHeight, setResize]);
 
   useEffect(() => {
     function onWheel(e: WheelEvent) {
@@ -455,11 +500,32 @@ export function Editor({ params }: EditorProps) {
     return { base: canvases[0] as HTMLCanvasElement, ann: canvases[1] as HTMLCanvasElement };
   }
 
+  /** The base pixels an export should composite against: the raw capture
+   * with the *current* adjustments applied.
+   *
+   * Deliberately re-derived from the source bitmap rather than reusing the
+   * on-screen canvas. That canvas already carries the adjustments, so reusing
+   * it would be right most of the time -- but its sharpness pass is debounced
+   * behind the slider, so an export fired mid-drag would save a frame the
+   * user has already moved past. Re-deriving here guarantees the file matches
+   * the settings, not the paint timing.
+   */
+  function exportBase(): HTMLCanvasElement | null {
+    const canvases = getCanvases();
+    if (!canvases) return null;
+    if (!baseImage) return canvases.base;
+    const raw = document.createElement("canvas");
+    raw.width = canvases.base.width;
+    raw.height = canvases.base.height;
+    raw.getContext("2d")!.drawImage(baseImage, 0, 0);
+    return applyAdjustments(raw, adjustments);
+  }
+
   /** Flatten options shared by every full-image export (copy, save, upload,
    * pin) -- OCR passes its own, since it wants the raw region without the
    * backdrop or a scale applied. */
   function exportOptions() {
-    return { cropRect, backdrop, scalePercent: exportScale };
+    return { cropRect, backdrop, target: resize };
   }
 
   async function doExport(action: Parameters<typeof exportPrepare>[0]) {
@@ -467,7 +533,7 @@ export function Editor({ params }: EditorProps) {
     if (!canvases) return;
     setExporting(true);
     try {
-      const bytes = await flattenToPng(canvases.base, shapes, exportOptions());
+      const bytes = await flattenToPng(exportBase() ?? canvases.base, shapes, exportOptions());
       await exportPrepare(action);
       const result = await exportCommit(bytes);
       if (action.kind === "clipboard") {
@@ -494,7 +560,7 @@ export function Editor({ params }: EditorProps) {
     if (!canvases) return;
     setExporting(true);
     try {
-      const bytes = await flattenToPng(canvases.base, shapes, exportOptions());
+      const bytes = await flattenToPng(exportBase() ?? canvases.base, shapes, exportOptions());
       const result = await uploadImage(bytes);
       await copyTextToClipboard(result.url);
       toast.show({
@@ -516,7 +582,7 @@ export function Editor({ params }: EditorProps) {
     const canvases = getCanvases();
     if (!canvases) return;
     try {
-      const bytes = await flattenToPng(canvases.base, shapes, exportOptions());
+      const bytes = await flattenToPng(exportBase() ?? canvases.base, shapes, exportOptions());
       await pinEditorImage(bytes);
       toast.show({ kind: "success", title: "Pinned to screen" });
     } catch (err) {
@@ -545,6 +611,158 @@ export function Editor({ params }: EditorProps) {
     applyCrop(rect);
     setBaseImage(cropped);
     setTool("select");
+  }
+
+  /** Word boxes for the current capture, fetched once and reused: OCR is the
+   * expensive part of both auto-redaction and highlighter text-snapping, and
+   * the base image doesn't change between them. Cleared when the image does. */
+  async function getWordBoxes(): Promise<OcrWordBox[]> {
+    const canvases = getCanvases();
+    if (!canvases) return [];
+    const cached = wordBoxesRef.current;
+    if (cached && cached.imageId === imageId) return cached.boxes;
+
+    // Boxes must be in image space, so this deliberately skips crop, backdrop
+    // and scale -- the shapes built from them are positioned in image space.
+    const bytes = await flattenToPng(canvases.base, []);
+    const boxes = await ocrBoxes(bytes);
+    wordBoxesRef.current = { imageId, boxes };
+    return boxes;
+  }
+
+  function setSnapToText(next: boolean) {
+    setSnapToTextState(next);
+    localStorage.setItem(SNAP_TO_TEXT_STORAGE_KEY, String(next));
+  }
+
+  // Boxes are fetched when the highlighter is armed with snapping on, not on
+  // first drag: OCR takes long enough that doing it mid-gesture would make
+  // the first highlight of each image feel like it hung.
+  useEffect(() => {
+    if (tool !== "highlight" || !snapToText) return;
+    if (ocrStatus !== null && !ocrStatus.available) return;
+    if (wordBoxesRef.current?.imageId === imageId) {
+      setTextBoxes(wordBoxesRef.current.boxes);
+      return;
+    }
+    let stale = false;
+    getWordBoxes()
+      .then((boxes) => {
+        if (!stale) setTextBoxes(boxes);
+      })
+      .catch(() => {
+        // Snapping simply stays off for this image; the freeform highlight
+        // still works, so there is nothing worth interrupting the user for.
+        if (!stale) setTextBoxes(null);
+      });
+    return () => {
+      stale = true;
+    };
+  }, [tool, snapToText, imageId, ocrStatus]);
+
+  /** Mirrors the base bitmap to match `flipImage`'s shape mirroring, so the
+   * flip is visible on the canvas immediately rather than only at export. */
+  async function handleFlip(axis: "h" | "v") {
+    if (!baseImage) return;
+    const canvas = document.createElement("canvas");
+    canvas.width = imageWidth;
+    canvas.height = imageHeight;
+    const ctx = canvas.getContext("2d")!;
+    ctx.translate(axis === "h" ? imageWidth : 0, axis === "v" ? imageHeight : 0);
+    ctx.scale(axis === "h" ? -1 : 1, axis === "v" ? -1 : 1);
+    ctx.drawImage(baseImage, 0, 0);
+    const mirrored = await createImageBitmap(canvas);
+    flipImage(axis);
+    setBaseImage(mirrored);
+    // Boxes were measured against the pre-flip image; keeping them would put
+    // redactions on the wrong side.
+    wordBoxesRef.current = null;
+  }
+
+  async function handleRedactPii() {
+    if (ocrStatus !== null && !ocrStatus.available) {
+      setOcrMissingOpen(true);
+      return;
+    }
+    setRedacting(true);
+    try {
+      const matches = findPii(await getWordBoxes());
+      if (matches.length === 0) {
+        toast.show({ kind: "success", title: "No personal data found" });
+        return;
+      }
+      // Padding: OCR boxes hug the glyphs, and a censor that stops exactly at
+      // the ink can leave readable fragments at the edges.
+      const pad = 2;
+      addShapes(
+        matches.map((m) => ({
+          id: crypto.randomUUID(),
+          kind: "pixelate" as const,
+          x: m.x - pad,
+          y: m.y - pad,
+          w: m.w + pad * 2,
+          h: m.h + pad * 2,
+          blockSize: style.pixelateBlock,
+          // Solid regardless of the current censor mode: redaction should be
+          // unambiguous, and a pixelated short string can still be guessable.
+          mode: "solid" as const,
+          color: style.censorColor,
+        })),
+      );
+      toast.show({
+        kind: "success",
+        title: `Redacted ${matches.length} item${matches.length === 1 ? "" : "s"}`,
+      });
+    } catch (err) {
+      toast.show({ kind: "error", title: "Couldn't redact", description: String(err) });
+    } finally {
+      setRedacting(false);
+    }
+  }
+
+  async function handleCensorFaces() {
+    const canvases = getCanvases();
+    if (!canvases) return;
+    setRedacting(true);
+    try {
+      const bytes = await flattenToPng(canvases.base, []);
+      const faces = await detectFaces(bytes);
+      if (faces.length === 0) {
+        toast.show({ kind: "success", title: "No faces found" });
+        return;
+      }
+      // Detectors bound the face tightly; widening keeps hair and chin in.
+      addShapes(
+        faces.map((f) => {
+          const padX = Math.round(f.w * 0.15);
+          const padY = Math.round(f.h * 0.15);
+          return {
+            id: crypto.randomUUID(),
+            kind: "pixelate" as const,
+            x: f.x - padX,
+            y: f.y - padY,
+            w: f.w + padX * 2,
+            h: f.h + padY * 2,
+            // Scaled to the face rather than taken from the slider: that
+            // default is sized for screenshot text, and on a large portrait
+            // it leaves the face plainly recognizable. Roughly a dozen
+            // blocks across the face is unreadable at any size, and the
+            // slider's value still acts as a floor.
+            blockSize: Math.max(style.pixelateBlock, Math.round(Math.min(f.w, f.h) / 12)),
+            mode: style.censorMode,
+            color: style.censorColor,
+          };
+        }),
+      );
+      toast.show({
+        kind: "success",
+        title: `Censored ${faces.length} face${faces.length === 1 ? "" : "s"}`,
+      });
+    } catch (err) {
+      toast.show({ kind: "error", title: "Couldn't detect faces", description: String(err) });
+    } finally {
+      setRedacting(false);
+    }
   }
 
   async function handleOcrRegion(rect: PhysRect) {
@@ -754,6 +972,8 @@ export function Editor({ params }: EditorProps) {
       filters: [
         { name: "PNG", extensions: ["png"] },
         { name: "JPEG", extensions: ["jpg", "jpeg"] },
+        { name: "WebP", extensions: ["webp"] },
+        { name: "AVIF", extensions: ["avif"] },
       ],
     });
     if (path) doExport({ kind: "save", path });
@@ -797,14 +1017,16 @@ export function Editor({ params }: EditorProps) {
       <Toolbar
         tool={tool}
         onToolChange={handleToolChange}
-        onUndo={undo}
-        onRedo={redo}
-        canUndo={past.length > 0}
-        canRedo={future.length > 0}
         onInsertImage={handleInsertImage}
         onToggleBackdrop={() => setBackdrop({ enabled: !backdrop.enabled })}
         backdropEnabled={backdrop.enabled}
         ocrUnavailable={ocrStatus !== null && !ocrStatus.available}
+        onToggleAdjust={() => setAdjustOpen(!adjustOpen)}
+        adjustOpen={adjustOpen}
+        onRedactPii={handleRedactPii}
+        onCensorFaces={handleCensorFaces}
+        busy={redacting}
+        onPin={doPin}
       />
       {ocrStatus && !ocrStatus.available && ocrStatus.install_hint && (
         <OcrMissingDialog
@@ -822,12 +1044,25 @@ export function Editor({ params }: EditorProps) {
             onOcrRegion={handleOcrRegion}
             onPickColor={(rgb, screenX, screenY) => setColorPopover({ rgb, screenX, screenY })}
             onConfirmCrop={applyCropConfirm}
+            snapToText={snapToText}
+            textBoxes={textBoxes}
           />
         </div>
         <PropertiesPanel
           tool={tool}
           style={style}
           onChange={setStyle}
+          adjustments={adjustments}
+          onAdjustmentsChange={setAdjustments}
+          onFlip={handleFlip}
+          adjustOpen={adjustOpen}
+          imageWidth={cropRect ? Math.round(cropRect.w) : imageWidth}
+          imageHeight={cropRect ? Math.round(cropRect.h) : imageHeight}
+          resize={resize}
+          onResizeChange={setResize}
+          snapToText={snapToText}
+          onSnapToTextChange={setSnapToText}
+          ocrUnavailable={ocrStatus !== null && !ocrStatus.available}
           selectedShape={selectedId ? shapes.find((s) => s.id === selectedId) ?? null : null}
           onUpdateShape={(shape) => updateShape(shape.id, shape)}
           onDeleteShape={() => selectedId && removeShape(selectedId)}
@@ -865,34 +1100,21 @@ export function Editor({ params }: EditorProps) {
             icon={<FolderOpen size={16} />}
             onClick={handleOpenImage}
           />
+          <IconButton
+            label="Undo"
+            shortcut="Ctrl+Z"
+            icon={<Undo2 size={16} />}
+            onClick={undo}
+            disabled={past.length === 0}
+          />
+          <IconButton
+            label="Redo"
+            shortcut="Ctrl+Shift+Z"
+            icon={<Redo2 size={16} />}
+            onClick={redo}
+            disabled={future.length === 0}
+          />
           <div className="w-px h-5 bg-[var(--border)] mx-1" />
-          {/* Wrapped in a span, not passed straight to Tooltip: the trigger
-              clones its child and hands it a ref, which `Select` (a plain
-              function component) can't receive. */}
-          <Tooltip label="Export size — scales the saved image, not the view">
-            <span className="inline-flex">
-              <Select
-                aria-label="Export size"
-                size="sm"
-                value={String(exportScale)}
-                onChange={(value) => {
-                  const percent = Number(value);
-                  setExportScale(percent);
-                  // Persist so the choice survives the next capture and restart.
-                  getSettings()
-                    .then((s) => setSettings({ ...s, export_scale: percent }))
-                    .catch(() => {});
-                }}
-                options={[
-                  { value: "100", label: "100%" },
-                  { value: "75", label: "75%" },
-                  { value: "50", label: "50%" },
-                  { value: "33", label: "33%" },
-                ]}
-              />
-            </span>
-          </Tooltip>
-          <IconButton label="Pin to screen" shortcut="Ctrl+P" icon={<Pin size={16} />} onClick={doPin} />
           <div className="flex items-center">
             <Button
               variant="flat-accent"

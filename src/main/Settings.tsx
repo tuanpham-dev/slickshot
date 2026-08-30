@@ -20,6 +20,12 @@ import {
   ocrListLangs,
   ocrEngineStatus,
   copyTextToClipboard,
+  gdriveSignIn,
+  gdriveSignOut,
+  gdriveAccount as gdriveAccountQuery,
+  checkUpdate,
+  installUpdate,
+  type UpdateStatus,
   type AppSettings,
   type CaptureMode,
   type OcrEngineStatus,
@@ -34,6 +40,7 @@ const MODE_LABELS: Record<CaptureMode, string> = {
   region_repeat: "Repeat last region",
   color: "Pick color",
   measure: "Measure",
+  region_quicksave: "Region to file",
 };
 
 const TARGET_LANGUAGES: { value: string; label: string }[] = [
@@ -68,6 +75,11 @@ export function Settings({ onBack }: { onBack: () => void }) {
   const [ocrLangs, setOcrLangs] = useState<string[]>([]);
   const [ocrStatus, setOcrStatus] = useState<OcrEngineStatus | null>(null);
   const [checkingOcr, setCheckingOcr] = useState(false);
+  const [gdriveAccount, setGdriveAccount] = useState<string | null>(null);
+  const [gdriveBusy, setGdriveBusy] = useState(false);
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [updateChecking, setUpdateChecking] = useState(false);
+  const [updateInstalling, setUpdateInstalling] = useState(false);
   const toast = useToast();
 
   function refreshOcrStatus() {
@@ -84,8 +96,65 @@ export function Settings({ onBack }: { onBack: () => void }) {
       .then(setOcrLangs)
       .catch(() => {});
     refreshOcrStatus();
+    gdriveAccountQuery()
+      .then(setGdriveAccount)
+      .catch(() => {});
+    // Cheap on this path: reports the running version and, on unsupported
+    // builds, says so -- without contacting the release feed.
+    checkUpdate()
+      .then(setUpdateStatus)
+      .catch(() => {});
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  async function handleCheckUpdate() {
+    setUpdateChecking(true);
+    try {
+      const status = await checkUpdate();
+      setUpdateStatus(status);
+      if (status.supported && !status.available) {
+        toast.show({ kind: "success", title: "SlickShot is up to date" });
+      }
+    } catch (err) {
+      toast.show({ kind: "error", title: "Couldn't check for updates", description: String(err) });
+    } finally {
+      setUpdateChecking(false);
+    }
+  }
+
+  async function handleInstallUpdate() {
+    setUpdateInstalling(true);
+    try {
+      // Relaunches on success, so anything after this only runs on failure.
+      await installUpdate();
+    } catch (err) {
+      toast.show({ kind: "error", title: "Couldn't install the update", description: String(err) });
+      setUpdateInstalling(false);
+    }
+  }
+
+  async function handleGdriveSignIn() {
+    setGdriveBusy(true);
+    try {
+      // Blocks until the browser round trip completes (or times out), which
+      // is why the button shows a waiting state rather than resolving fast.
+      setGdriveAccount(await gdriveSignIn());
+      toast.show({ kind: "success", title: "Google Drive connected" });
+    } catch (err) {
+      toast.show({ kind: "error", title: "Couldn't connect Google Drive", description: String(err) });
+    } finally {
+      setGdriveBusy(false);
+    }
+  }
+
+  async function handleGdriveSignOut() {
+    try {
+      await gdriveSignOut();
+      setGdriveAccount(null);
+    } catch (err) {
+      toast.show({ kind: "error", title: "Couldn't sign out", description: String(err) });
+    }
+  }
 
   async function handleCheckOcrAgain() {
     setCheckingOcr(true);
@@ -187,14 +256,6 @@ export function Settings({ onBack }: { onBack: () => void }) {
         <section className="flex flex-col gap-3">
           <h2 className="text-sm font-semibold text-[var(--fg)]">General</h2>
           <div className="flex items-center justify-between">
-            <span className="text-sm text-[var(--fg)]">Open editor after capture</span>
-            <Switch
-              aria-label="Open editor after capture"
-              checked={settings.open_editor_after_capture}
-              onChange={(v) => update({ open_editor_after_capture: v })}
-            />
-          </div>
-          <div className="flex items-center justify-between">
             <span className="text-sm text-[var(--fg)]">Also copy on capture</span>
             <Switch
               aria-label="Also copy on capture"
@@ -246,22 +307,50 @@ export function Settings({ onBack }: { onBack: () => void }) {
               options={[
                 { value: "png", label: "PNG" },
                 { value: "jpg", label: "JPG" },
+                { value: "webp", label: "WebP" },
+                { value: "avif", label: "AVIF" },
               ]}
             />
           </div>
-          <div className="flex items-center justify-between gap-4">
-            <span className="text-sm text-[var(--fg)] shrink-0">JPEG quality</span>
-            <div className="w-32">
-              <Slider
-                aria-label="JPEG quality"
-                value={settings.jpeg_quality}
-                min={10}
-                max={100}
-                disabled={settings.default_format !== "jpg"}
-                onChange={(v) => update({ jpeg_quality: v })}
-              />
+          {/* Only the quality knob that applies to the chosen format is
+              shown; a permanently-greyed slider for the other one is just
+              noise. PNG and WebP are lossless here and have neither. */}
+          {settings.default_format === "jpg" && (
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-sm text-[var(--fg)] shrink-0">JPEG quality</span>
+              <div className="w-32">
+                <Slider
+                  aria-label="JPEG quality"
+                  value={settings.jpeg_quality}
+                  min={10}
+                  max={100}
+                  onChange={(v) => update({ jpeg_quality: v })}
+                />
+              </div>
             </div>
-          </div>
+          )}
+          {settings.default_format === "avif" && (
+            <div className="flex items-center justify-between gap-4">
+              <span className="text-sm text-[var(--fg)] shrink-0">AVIF quality</span>
+              <div className="w-32">
+                <Slider
+                  aria-label="AVIF quality"
+                  value={settings.avif_quality}
+                  min={10}
+                  max={100}
+                  onChange={(v) => update({ avif_quality: v })}
+                />
+              </div>
+            </div>
+          )}
+          {settings.default_format === "avif" && (
+            <p className="text-xs text-[var(--fg-muted)]">
+              AVIF encodes slowly on large captures -- saving a full-screen shot can take a few seconds.
+            </p>
+          )}
+          {settings.default_format === "webp" && (
+            <p className="text-xs text-[var(--fg-muted)]">WebP is written losslessly, so quality settings do not apply.</p>
+          )}
         </section>
 
         <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
@@ -366,6 +455,8 @@ export function Settings({ onBack }: { onBack: () => void }) {
                 { value: "catbox", label: "catbox.moe (no account)" },
                 { value: "imgur", label: "Imgur" },
                 { value: "s3", label: "S3-compatible" },
+                { value: "imgbb", label: "imgbb" },
+                { value: "gdrive", label: "Google Drive" },
               ]}
             />
           </div>
@@ -377,6 +468,48 @@ export function Settings({ onBack }: { onBack: () => void }) {
                 placeholder="e.g. 0123456789abcde"
               />
             </Field>
+          )}
+          {settings.upload_provider === "imgbb" && (
+            <Field label="imgbb API key" hint="Get a free key at api.imgbb.com. Uploads are public — anyone with the link can view them. The key is stored in plain text in this app's settings file.">
+              <Input
+                value={settings.imgbb_api_key}
+                onChange={(e) => update({ imgbb_api_key: e.target.value })}
+                placeholder="e.g. 0123456789abcdef0123456789abcdef"
+              />
+            </Field>
+          )}
+          {settings.upload_provider === "gdrive" && (
+            <>
+              <Field
+                label="Google OAuth client ID"
+                hint="Create a Desktop app OAuth client in your own Google Cloud project, enable the Drive API, then sign in below. Uploads go to a SlickShot folder in your Drive and are shared with anyone who has the link. The sign-in token is stored in plain text in this app's data folder."
+              >
+                <Input
+                  value={settings.gdrive_client_id}
+                  onChange={(e) => update({ gdrive_client_id: e.target.value })}
+                  placeholder="e.g. 1234567890-abc.apps.googleusercontent.com"
+                />
+              </Field>
+              <div className="flex items-center justify-between">
+                <span className="text-sm text-[var(--fg)]">
+                  {gdriveAccount ? `Connected as ${gdriveAccount}` : "Not connected"}
+                </span>
+                {gdriveAccount ? (
+                  <Button variant="secondary" size="sm" onClick={handleGdriveSignOut}>
+                    Sign out
+                  </Button>
+                ) : (
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={gdriveBusy || !settings.gdrive_client_id.trim()}
+                    onClick={handleGdriveSignIn}
+                  >
+                    {gdriveBusy ? "Waiting for browser…" : "Sign in"}
+                  </Button>
+                )}
+              </div>
+            </>
           )}
           {settings.upload_provider === "s3" && (
             <>
@@ -434,6 +567,53 @@ export function Settings({ onBack }: { onBack: () => void }) {
                 />
               </Field>
             </>
+          )}
+        </section>
+
+        <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
+          <h2 className="text-sm font-semibold text-[var(--fg)]">Updates</h2>
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-[var(--fg)]">
+              Version {updateStatus?.current_version ?? "…"}
+            </span>
+            <Button
+              variant="secondary"
+              size="sm"
+              disabled={updateChecking || updateInstalling}
+              onClick={handleCheckUpdate}
+            >
+              {updateChecking ? "Checking…" : "Check for updates"}
+            </Button>
+          </div>
+          {updateStatus && !updateStatus.supported && (
+            <p className="text-xs text-[var(--fg-muted)]">
+              This build is managed by your package manager -- update SlickShot the same way you installed it.
+            </p>
+          )}
+          {updateStatus?.supported && (
+            <div className="flex items-center justify-between">
+              <span className="text-sm text-[var(--fg)]">Check automatically</span>
+              <Switch
+                aria-label="Check for updates automatically"
+                checked={settings.auto_check_updates}
+                onChange={(v) => update({ auto_check_updates: v })}
+              />
+            </div>
+          )}
+          {updateStatus?.available && (
+            <div className="flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--border)] p-3">
+              <span className="text-sm font-medium text-[var(--fg)]">
+                Version {updateStatus.available.version} is available
+              </span>
+              {updateStatus.available.notes && (
+                <p className="text-xs text-[var(--fg-muted)] whitespace-pre-wrap max-h-32 overflow-y-auto">
+                  {updateStatus.available.notes}
+                </p>
+              )}
+              <Button size="sm" disabled={updateInstalling} onClick={handleInstallUpdate}>
+                {updateInstalling ? "Installing…" : "Download and install"}
+              </Button>
+            </div>
           )}
         </section>
 

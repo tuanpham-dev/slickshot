@@ -32,11 +32,22 @@ import {
   type MonitorInfo,
   type WindowInfo,
 } from "../lib/ipc";
-import { rectContains, rectIntersect, type PhysPoint, type PhysRect } from "../lib/geometry";
+import { rectContains, rectFromPoints, rectIntersect, type PhysPoint, type PhysRect } from "../lib/geometry";
 import { measurementLabel } from "../lib/color";
 import { ResultTabs, type ResultTab } from "../ui/ResultTabs";
 import { IconButton } from "../ui/IconButton";
-import { HANDLES, pickHandle, resizeRect, type HandleId } from "./resize";
+import {
+  ASPECT_OPTIONS,
+  HANDLES,
+  aspectRatio,
+  constrainToAspect,
+  pickHandle,
+  resizeRect,
+  snapRectToEdges,
+  type AspectId,
+  type HandleId,
+  type SnapGuide,
+} from "./resize";
 import {
   COLOR_FORMATS,
   Loupe,
@@ -100,6 +111,17 @@ type DragMode = "draw" | "move" | HandleId | null;
 
 const HANDLE_HIT_CSS_PX = 12;
 
+const ASPECT_STORAGE_KEY = "slickshot:regionAspect";
+
+/** The aspect lock persists across captures (localStorage, not settings:
+ * it's a transient selection preference, and routing it through
+ * `set_settings` would re-register every hotkey per change). */
+function loadAspect(): AspectId {
+  const stored = localStorage.getItem(ASPECT_STORAGE_KEY);
+  const match = ASPECT_OPTIONS.find((o) => o.id !== null && o.id === stored);
+  return match ? match.id : null;
+}
+
 function pct(numerator: number, denominator: number): string {
   return `${(numerator / denominator) * 100}%`;
 }
@@ -139,6 +161,10 @@ export function Overlay({ params }: OverlayProps) {
   // handler below), not per drag-selected region -- defaults to true so the
   // first region in a session isn't held back by the check still in flight.
   const primaryAvailableRef = useRef(true);
+
+  const [aspect, setAspect] = useState<AspectId>(loadAspect);
+  const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
+  const [dimDraft, setDimDraft] = useState<{ w: string; h: string } | null>(null);
 
   const [cursor, setCursor] = useState<CursorState | null>(null);
   const [colorFormat, setColorFormat] = useState<ColorFormat>("hex");
@@ -432,6 +458,37 @@ export function Overlay({ params }: OverlayProps) {
     selectionBegin(p);
   }
 
+  /** Edge snapping is on in region mode unless Alt is held (the documented
+   * bypass) -- and never in the other modes, which have no window-aligned
+   * region to snap to. */
+  function edgeSnapEnabled(e: { altKey: boolean }): boolean {
+    return regionMode && !e.altKey && windows.length > 0;
+  }
+
+  /** Snaps `rect` to nearby window edges and publishes the guide lines,
+   * returning the (possibly unchanged) rect for the caller to commit. */
+  function applyEdgeSnap(
+    rect: PhysRect,
+    e: { altKey: boolean },
+    moving: { left: boolean; right: boolean; top: boolean; bottom: boolean },
+  ): PhysRect {
+    if (!edgeSnapEnabled(e)) {
+      setSnapGuides([]);
+      return rect;
+    }
+    // Threshold in physical px, scaled so it feels like a constant ~8 CSS px
+    // regardless of the monitor's scale factor.
+    const scale = monitor && containerRef.current ? monitor.rect.w / containerRef.current.clientWidth : 1;
+    const result = snapRectToEdges(
+      rect,
+      windows.map((w) => w.rect),
+      Math.round(8 * scale),
+      moving,
+    );
+    setSnapGuides(result.guides);
+    return result.rect;
+  }
+
   /** Smallest window whose bounds contain `p` -- smallest so a dialog on top
    * of its parent wins instead of the big window behind it. */
   function windowAt(p: PhysPoint): WindowInfo | null {
@@ -484,25 +541,61 @@ export function Overlay({ params }: OverlayProps) {
       setHoveredWindow(canSnap ? windowAt(p) : null);
     }
     if (mode === "draw") {
-      selectionUpdate(p);
+      const anchor = pressPointRef.current;
+      // The plain path stays server-side (`selectionUpdate` derives the rect
+      // from the anchor Rust holds); aspect/snap need the rect client-side to
+      // adjust it, so those go through `selectionSetRect` instead.
+      if (!anchor || (aspect === null && !edgeSnapEnabled(e))) {
+        setSnapGuides([]);
+        selectionUpdate(p);
+        return;
+      }
+      const raw = constrainToAspect(rectFromPoints(anchor, p), aspect, anchor);
+      const growsRight = p.x >= anchor.x;
+      const growsDown = p.y >= anchor.y;
+      selectionSetRect(
+        applyEdgeSnap(raw, e, {
+          left: !growsRight,
+          right: growsRight,
+          top: !growsDown,
+          bottom: growsDown,
+        }),
+      );
       return;
     }
     if (mode === "move") {
       const orig = dragOrigRectRef.current;
       const start = dragStartRef.current;
       if (!orig || !start) return;
-      selectionSetRect({
+      const moved = {
         x: orig.x + (p.x - start.x),
         y: orig.y + (p.y - start.y),
         w: orig.w,
         h: orig.h,
-      });
+      };
+      // A body drag translates the rect, so snapping one edge has to carry
+      // the opposite edge with it rather than resizing.
+      const snapped = applyEdgeSnap(moved, e, { left: true, right: true, top: true, bottom: true });
+      selectionSetRect({ x: snapped.x, y: snapped.y, w: moved.w, h: moved.h });
       return;
     }
     if (mode) {
       const orig = dragOrigRectRef.current;
       if (!orig) return;
-      selectionSetRect(resizeRect(orig, mode, p));
+      const resized = resizeRect(orig, mode, p);
+      const anchor = {
+        x: mode.includes("w") ? orig.x + orig.w : orig.x,
+        y: mode.includes("n") ? orig.y + orig.h : orig.y,
+      };
+      const shaped = constrainToAspect(resized, aspect, anchor);
+      selectionSetRect(
+        applyEdgeSnap(shaped, e, {
+          left: mode.includes("w"),
+          right: mode.includes("e"),
+          top: mode.includes("n"),
+          bottom: mode.includes("s"),
+        }),
+      );
     }
   }
 
@@ -574,6 +667,9 @@ export function Overlay({ params }: OverlayProps) {
     dragOrigRectRef.current = null;
     dragStartRef.current = null;
     setDragMode(null);
+    // Guides are a live drag affordance; leaving them up afterwards reads
+    // as a permanent part of the selection.
+    setSnapGuides([]);
 
     if (translateMode && finalRect) {
       runTranslate(finalRect);
@@ -647,6 +743,12 @@ export function Overlay({ params }: OverlayProps) {
   // require starting over, and confirming doesn't require the keyboard.
   const editable = sel !== null && dragMode !== "draw";
 
+  // Virtual-screen coordinate -> fraction of this monitor's width/height,
+  // the same normalization `sel` does, for chrome positioned by absolute
+  // physical coordinate (the snap guides) rather than by the selection.
+  const physToFracX = (x: number) => (monitor ? (x - monitor.rect.x) / monitor.rect.w : 0);
+  const physToFracY = (y: number) => (monitor ? (y - monitor.rect.y) / monitor.rect.h : 0);
+
   // Horizontal center for the translate-mode result popover, clamped in CSS
   // pixels so its fixed 320px width (`w-80`) can't run off the left/right
   // edge of the monitor -- `sel`'s other positions are percent-based and
@@ -703,6 +805,34 @@ export function Overlay({ params }: OverlayProps) {
   // without this the last-drawn rect (mask cutout, border, size label)
   // stayed on screen during that gap, visible as a flash of the previous
   // selection the next time an overlay opens.
+  /** Commits typed width/height, re-anchored at the selection's top-left so
+   * the rect grows right/down from where it already is. */
+  function commitDimensions() {
+    const draft = dimDraft;
+    setDimDraft(null);
+    if (!draft || !selection) return;
+    const w = Math.max(1, Math.round(Number(draft.w)));
+    const h = Math.max(1, Math.round(Number(draft.h)));
+    if (!Number.isFinite(w) || !Number.isFinite(h)) return;
+    if (w === selection.w && h === selection.h) return;
+    // With an aspect locked, the typed width wins and the height follows --
+    // committing both verbatim would silently break the lock.
+    const ratio = aspectRatio(aspect);
+    const height = ratio === null ? h : Math.max(1, Math.round(w / ratio));
+    selectionSetRect({ x: selection.x, y: selection.y, w, h: height });
+  }
+
+  function changeAspect(next: AspectId) {
+    setAspect(next);
+    if (next === null) localStorage.removeItem(ASPECT_STORAGE_KEY);
+    else localStorage.setItem(ASPECT_STORAGE_KEY, next);
+    // Reshape what's already selected so the lock takes effect immediately
+    // rather than only on the next drag.
+    if (selection && next !== null) {
+      selectionSetRect(constrainToAspect(selection, next, { x: selection.x, y: selection.y }));
+    }
+  }
+
   function handleConfirm() {
     setSelection(null);
     selectionConfirm();
@@ -767,10 +897,50 @@ export function Overlay({ params }: OverlayProps) {
                 }}
               />
               <span
-                className="absolute text-[11px] font-mono bg-[var(--fg)] text-[var(--bg)] px-1.5 py-0.5 rounded-[3px]"
-                style={{ left: pct(sel.left, 1), top: `calc(${pct(sel.top, 1)} - 22px)` }}
+                className="absolute flex items-center gap-1 text-[11px] font-mono bg-[var(--fg)] text-[var(--bg)] px-1.5 py-0.5 rounded-[3px]"
+                style={{
+                  left: pct(sel.left, 1),
+                  top: `calc(${pct(sel.top, 1)} - 22px)`,
+                  pointerEvents: editable ? "auto" : "none",
+                }}
+                // The label sits inside the container's pointer handlers; a
+                // press on the inputs would otherwise start a fresh drag
+                // underneath and immediately blur the field being typed in.
+                onPointerDown={(e) => e.stopPropagation()}
               >
-                {selection?.w} × {selection?.h}
+                {editable ? (
+                  <>
+                    <input
+                      aria-label="Selection width"
+                      className="w-10 bg-transparent text-right outline-none focus:underline"
+                      value={dimDraft ? dimDraft.w : String(selection?.w ?? 0)}
+                      onChange={(e) => setDimDraft({ w: e.target.value, h: dimDraft?.h ?? String(selection?.h ?? 0) })}
+                      onBlur={commitDimensions}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitDimensions();
+                        if (e.key === "Escape") setDimDraft(null);
+                        e.stopPropagation();
+                      }}
+                    />
+                    ×
+                    <input
+                      aria-label="Selection height"
+                      className="w-10 bg-transparent outline-none focus:underline"
+                      value={dimDraft ? dimDraft.h : String(selection?.h ?? 0)}
+                      onChange={(e) => setDimDraft({ w: dimDraft?.w ?? String(selection?.w ?? 0), h: e.target.value })}
+                      onBlur={commitDimensions}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") commitDimensions();
+                        if (e.key === "Escape") setDimDraft(null);
+                        e.stopPropagation();
+                      }}
+                    />
+                  </>
+                ) : (
+                  <>
+                    {selection?.w} × {selection?.h}
+                  </>
+                )}
               </span>
               {editable &&
                 HANDLES.map(({ id, xFrac, yFrac, cursor }) => (
@@ -1006,6 +1176,41 @@ export function Overlay({ params }: OverlayProps) {
         </button>
       )}
 
+      {imgLoaded &&
+        snapGuides.map((g) => (
+          <div
+            key={`${g.axis}-${g.position}`}
+            className="absolute bg-[var(--accent)] pointer-events-none"
+            style={
+              g.axis === "x"
+                ? { left: pct(physToFracX(g.position), 1), top: 0, bottom: 0, width: 1 }
+                : { top: pct(physToFracY(g.position), 1), left: 0, right: 0, height: 1 }
+            }
+          />
+        ))}
+
+      {imgLoaded && regionMode && (
+        <div
+          className="absolute top-4 left-1/2 -translate-x-1/2 flex items-center gap-0.5 p-1 rounded-full bg-[var(--surface)] border border-[var(--border)] shadow-[var(--shadow-md)]"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          {ASPECT_OPTIONS.map((o) => (
+            <button
+              key={o.label}
+              type="button"
+              onClick={() => changeAspect(o.id)}
+              className={`h-7 px-2.5 rounded-full text-[11px] font-medium ${
+                aspect === o.id
+                  ? "bg-[var(--accent)] text-white"
+                  : "text-[var(--fg)] hover:bg-[var(--surface-hover)]"
+              }`}
+            >
+              {o.label}
+            </button>
+          ))}
+        </div>
+      )}
+
       {imageId && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-[11px] text-[var(--bg)] bg-[var(--fg)]/80 px-3 py-1.5 rounded-full pointer-events-none">
           {pickWindow
@@ -1019,8 +1224,8 @@ export function Overlay({ params }: OverlayProps) {
                     ? "Drag to select a region to translate · Esc to exit"
                     : "Drag to select a region to extract text · Esc to exit"
                   : editable
-                    ? "Drag to move · Enter to capture · Esc to cancel"
-                    : "Drag to select · Ctrl+click a window to snap · Enter to capture · Esc to cancel"}
+                    ? "Drag to move · Alt disables edge snap · Enter to capture · Esc to cancel"
+                    : "Drag to select · Ctrl+click a window to snap · Alt disables edge snap · Enter to capture · Esc to cancel"}
         </div>
       )}
     </div>

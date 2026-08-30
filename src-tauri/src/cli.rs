@@ -97,7 +97,8 @@ pub struct CaptureArgs {
 
 #[derive(Args, Debug, Clone, Default)]
 pub struct OutputArgs {
-    /// Save to this file. Format is inferred from the extension (.png, .jpg/.jpeg).
+    /// Save to this file. Format is inferred from the extension (.png,
+    /// .jpg/.jpeg, .webp, .avif).
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
     /// Copy the result to the clipboard.
@@ -107,9 +108,34 @@ pub struct OutputArgs {
     #[arg(long)]
     pub stdout: bool,
     /// Open the annotation editor instead of exporting directly
-    /// (interactive captures only: region/window).
+    /// (interactive captures only: region/window). Shorthand for
+    /// `--post-capture editor`.
     #[arg(long)]
     pub edit: bool,
+    /// What happens once the capture lands, overriding the saved setting for
+    /// this run: open the editor, show the floating thumbnail, or neither.
+    /// Interactive captures only (region/window), and only when no `-o`,
+    /// `-c` or `--stdout` sink is given -- those export directly instead.
+    #[arg(long, value_enum)]
+    pub post_capture: Option<PostCaptureArg>,
+}
+
+/// Mirrors `settings::PostCaptureAction` as a clap-parseable value.
+#[derive(clap::ValueEnum, Debug, Clone, Copy)]
+pub enum PostCaptureArg {
+    Editor,
+    Thumbnail,
+    None,
+}
+
+impl From<PostCaptureArg> for crate::settings::PostCaptureAction {
+    fn from(value: PostCaptureArg) -> Self {
+        match value {
+            PostCaptureArg::Editor => Self::Editor,
+            PostCaptureArg::Thumbnail => Self::Thumbnail,
+            PostCaptureArg::None => Self::None,
+        }
+    }
 }
 
 /// Rejects flag combinations that only make sense for headless captures.
@@ -310,7 +336,8 @@ fn write_sink(img: &RgbaImage, output: &OutputArgs, settings: &Settings) -> Resu
     Ok(())
 }
 
-/// Encodes `img` by `path`'s extension (`.png`, `.jpg`/`.jpeg`) and writes
+/// Encodes `img` by `path`'s extension (`.png`, `.jpg`/`.jpeg`, `.webp`,
+/// `.avif`) and writes
 /// it, creating parent directories as needed. Shared by the headless sink
 /// above and `export_to_sink` below (the GUI-side CLI-triggered capture
 /// path), so `-o` behaves identically whether the app was already running.
@@ -320,9 +347,13 @@ pub(crate) fn write_to_path(img: &RgbaImage, path: &Path) -> Result<(), String> 
         image::ImageFormat::Png
     } else if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         image::ImageFormat::Jpeg
+    } else if lower.ends_with(".webp") {
+        image::ImageFormat::WebP
+    } else if lower.ends_with(".avif") {
+        image::ImageFormat::Avif
     } else {
         return Err(format!(
-            "unsupported output extension in \"{}\" (use .png or .jpg/.jpeg)",
+            "unsupported output extension in \"{}\" (use .png, .jpg/.jpeg, .webp or .avif)",
             path.display()
         ));
     };
@@ -420,8 +451,16 @@ fn spawn_open(app: AppHandle, path: PathBuf) {
 }
 
 fn spawn_capture(app: AppHandle, mode: CaptureMode, capture: CaptureArgs) {
-    let sink = if capture.output.edit { None } else { Some(capture.output) };
+    // `--edit` and `--post-capture` both mean "don't export directly", so
+    // either one clears the sink and lets the capture reach `deliver_capture`.
+    let routed = capture.output.edit || capture.output.post_capture.is_some();
+    let sink = if routed { None } else { Some(capture.output.clone()) };
     *app.state::<CliSink>().0.lock().unwrap() = sink;
+    *app.state::<crate::commands::PostCaptureOverride>().0.lock().unwrap() = capture
+        .output
+        .post_capture
+        .map(Into::into)
+        .or(capture.output.edit.then_some(crate::settings::PostCaptureAction::Editor));
     tauri::async_runtime::spawn(async move {
         let capturer = app.state::<Capturer>();
         let session = app.state::<Mutex<Option<CaptureSession>>>();

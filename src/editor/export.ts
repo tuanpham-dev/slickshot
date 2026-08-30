@@ -8,13 +8,15 @@ export interface FlattenOptions {
   cropRect?: PhysRect | null;
   /** Frame composited around the result; ignored when `enabled` is false. */
   backdrop?: Backdrop | null;
-  /** Percent of native size for the final image (100 = untouched). */
-  scalePercent?: number;
+  /** Explicit output size for the image, or null/undefined to keep its own
+   * dimensions. Applied before the backdrop, so the number the user typed is
+   * the size of the *picture* and any frame is added around it. */
+  target?: { w: number; h: number } | null;
 }
 
-function scaleCanvas(source: HTMLCanvasElement, percent: number): HTMLCanvasElement {
-  const width = Math.max(1, Math.round((source.width * percent) / 100));
-  const height = Math.max(1, Math.round((source.height * percent) / 100));
+function resizeCanvas(source: HTMLCanvasElement, w: number, h: number): HTMLCanvasElement {
+  const width = Math.max(1, Math.round(w));
+  const height = Math.max(1, Math.round(h));
   const out = document.createElement("canvas");
   out.width = width;
   out.height = height;
@@ -37,7 +39,7 @@ export async function flattenToPng(
   shapes: Shape[],
   opts: FlattenOptions = {},
 ): Promise<Uint8Array> {
-  const { cropRect = null, backdrop = null, scalePercent = 100 } = opts;
+  const { cropRect = null, backdrop = null, target = null } = opts;
 
   await preloadImageShapes(shapes);
 
@@ -58,8 +60,10 @@ export async function flattenToPng(
   ctx.drawImage(baseCanvas, sx, sy, width, height, 0, 0, width, height);
   ctx.drawImage(annotations, sx, sy, width, height, 0, 0, width, height);
 
+  if (target && (target.w !== out.width || target.h !== out.height)) {
+    out = resizeCanvas(out, target.w, target.h);
+  }
   if (backdrop?.enabled) out = drawBackdrop(out, backdrop);
-  if (scalePercent !== 100) out = scaleCanvas(out, scalePercent);
 
   const blob = await new Promise<Blob | null>((resolve) => out.toBlob(resolve, "image/png"));
   if (!blob) throw new Error("Failed to encode PNG");

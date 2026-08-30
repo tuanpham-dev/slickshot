@@ -137,6 +137,89 @@ fn upload_imgur(png: Vec<u8>, client_id: &str) -> Result<UploadResult, String> {
     })
 }
 
+fn parse_imgbb_response(body: &serde_json::Value) -> Result<(String, Option<String>), String> {
+    let success = body.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    if !success {
+        let message = body
+            .get("error")
+            .and_then(|e| e.get("message"))
+            .and_then(|m| m.as_str())
+            .unwrap_or("upload rejected");
+        return Err(format!("imgbb error: {message}"));
+    }
+
+    let data = body.get("data").ok_or("unexpected imgbb response shape")?;
+    let url = data
+        .get("url")
+        .and_then(|v| v.as_str())
+        .ok_or("imgbb response missing url")?
+        .to_string();
+    // imgbb hands back a page URL that revokes the image; unlike Imgur's
+    // deletehash it is a full URL already, so it is stored as-is.
+    let delete_url = data
+        .get("delete_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Ok((url, delete_url))
+}
+
+/// Uploads to imgbb, which takes an API key as a query parameter and the
+/// image as base64 in a multipart field.
+fn upload_imgbb(png: Vec<u8>, api_key: &str) -> Result<UploadResult, String> {
+    if api_key.trim().is_empty() {
+        return Err(
+            "imgbb is selected but no API key is set -- add one in Settings > Upload (get one free at api.imgbb.com)."
+                .to_string(),
+        );
+    }
+
+    let client = http_client()?;
+    let encoded = base64_encode(&png);
+    let form = reqwest::blocking::multipart::Form::new().text("image", encoded);
+
+    let resp = client
+        .post(format!("https://api.imgbb.com/1/upload?key={api_key}"))
+        .multipart(form)
+        .send()
+        .map_err(|e| format!("couldn't reach imgbb: {e}"))?;
+
+    let status = resp.status();
+    let body: serde_json::Value = resp
+        .json()
+        .map_err(|e| format!("couldn't parse imgbb response: {e}"))?;
+    let (url, delete_url) = parse_imgbb_response(&body).map_err(|e| {
+        if status.is_success() {
+            e
+        } else {
+            format!("{e} (HTTP {status})")
+        }
+    })?;
+
+    Ok(UploadResult {
+        url,
+        delete_url,
+        provider: "imgbb".to_string(),
+    })
+}
+
+/// Standard base64, written out rather than pulling in a crate for the one
+/// call site that needs it.
+fn base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0] as u32;
+        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
+        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
+        let n = (b0 << 16) | (b1 << 8) | b2;
+        out.push(TABLE[(n >> 18) as usize & 63] as char);
+        out.push(TABLE[(n >> 12) as usize & 63] as char);
+        out.push(if chunk.len() > 1 { TABLE[(n >> 6) as usize & 63] as char } else { '=' });
+        out.push(if chunk.len() > 2 { TABLE[n as usize & 63] as char } else { '=' });
+    }
+    out
+}
+
 /// Builds the bucket handle for the configured S3-compatible store. A blank
 /// endpoint means AWS S3 proper (`Region::from_str` on the region name);
 /// anything else is treated as a custom endpoint (MinIO, R2, B2), which
@@ -257,6 +340,8 @@ pub(crate) fn upload_core(
         UploadProvider::Catbox => upload_catbox(png),
         UploadProvider::Imgur => upload_imgur(png, &settings.imgur_client_id),
         UploadProvider::S3 => upload_s3(png, settings, uploaded_at),
+        UploadProvider::Imgbb => upload_imgbb(png, &settings.imgbb_api_key),
+        UploadProvider::Gdrive => crate::drive::upload(png, settings, uploaded_at),
     }
 }
 
@@ -342,6 +427,12 @@ pub fn upload_delete(app: AppHandle, url: String) -> CommandResult<Vec<UploadEnt
         .as_deref()
         .ok_or_else(|| CommandError::Image("this upload has no delete link".into()))?;
 
+    // Drive entries carry `gdrive:{id}` and go through the Drive API.
+    if let Some(id) = delete_url.strip_prefix("gdrive:") {
+        crate::drive::delete(&app, id).map_err(CommandError::Image)?;
+        return remove_from_history(&app, history, &url);
+    }
+
     // S3 entries carry `s3://{key}` instead of an HTTP delete endpoint, and
     // are removed through the bucket API rather than Imgur's.
     if let Some(key) = delete_url.strip_prefix("s3://") {
@@ -424,12 +515,20 @@ pub fn upload_image(app: AppHandle, request: tauri::ipc::Request<'_>) -> Command
         }
     };
 
+    upload_and_record(&app, bytes)
+}
+
+/// Uploads `png` to the configured provider and appends the result to the
+/// history store. Shared by the editor's `upload_image` command and the
+/// post-capture thumbnail's Upload action, which has no canvas to flatten
+/// and hands over the stored capture's bytes directly.
+pub(crate) fn upload_and_record(app: &AppHandle, png: Vec<u8>) -> CommandResult<UploadResult> {
     let settings = get_settings(app.clone())?;
     let uploaded_at = filename_timestamp_rfc3339();
-    let result = upload_core(&settings, bytes, &uploaded_at).map_err(CommandError::Image)?;
+    let result = upload_core(&settings, png, &uploaded_at).map_err(CommandError::Image)?;
 
     history_append(
-        &app,
+        app,
         UploadEntry {
             url: result.url.clone(),
             delete_url: result.delete_url.clone(),

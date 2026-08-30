@@ -18,5 +18,7 @@ export function createArrow(
     y2: end.y,
     stroke: style.stroke,
     strokeWidth: style.strokeWidth,
+    style: style.arrowStyle,
+    banner: style.arrowBanner,
   };
 }

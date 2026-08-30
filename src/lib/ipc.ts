@@ -10,7 +10,8 @@ export type CaptureMode =
   | "window"
   | "translate"
   | "color"
-  | "measure";
+  | "measure"
+  | "region_quicksave";
 
 export interface MonitorInfo {
   id: number;
@@ -124,18 +125,24 @@ export interface HotkeyBinding {
 
 export interface AppSettings {
   save_dir: string | null;
-  default_format: "png" | "jpg";
+  default_format: "png" | "jpg" | "webp" | "avif";
   jpeg_quality: number;
+  avif_quality: number;
   hotkeys: HotkeyBinding[];
   default_delay_ms: number;
+  /** Superseded by `post_capture`; still sent so an old settings.json keeps
+   * round-tripping through set_settings unchanged. */
   open_editor_after_capture: boolean;
   copy_on_capture: boolean;
+  post_capture: "editor" | "thumbnail" | "none";
   theme: "system" | "light" | "dark";
   translate_enabled: boolean;
   translate_target: string;
   ocr_lang: string;
-  upload_provider: "catbox" | "imgur" | "s3";
+  upload_provider: "catbox" | "imgur" | "s3" | "imgbb" | "gdrive";
   imgur_client_id: string;
+  imgbb_api_key: string;
+  gdrive_client_id: string;
   export_scale: number;
   s3_endpoint: string;
   s3_region: string;
@@ -144,6 +151,7 @@ export interface AppSettings {
   s3_secret_key: string;
   s3_key_prefix: string;
   s3_public_base: string;
+  auto_check_updates: boolean;
 }
 
 export const getSettings = () => call<AppSettings>("get_settings");
@@ -156,6 +164,60 @@ export async function ocrExtract(pngBytes: Uint8Array): Promise<string> {
   } catch (err) {
     throw new IpcError(err);
   }
+}
+
+/** Word-level bounding boxes for the same PNG `ocrExtract` reads, in image
+ * pixels -- backs auto-redaction and the highlighter's text-line snapping. */
+export async function ocrBoxes(pngBytes: Uint8Array): Promise<OcrWordBox[]> {
+  try {
+    return await invoke<OcrWordBox[]>("ocr_boxes", pngBytes);
+  } catch (err) {
+    throw new IpcError(err);
+  }
+}
+
+export interface FaceBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Frontal-face boxes in the given PNG, in image pixels. Runs on-device via
+ * the bundled SeetaFace model -- no network, no per-use download. */
+export async function detectFaces(pngBytes: Uint8Array): Promise<FaceBox[]> {
+  try {
+    return await invoke<FaceBox[]>("detect_faces", pngBytes);
+  } catch (err) {
+    throw new IpcError(err);
+  }
+}
+
+/** Runs the Google Drive consent flow; resolves with the connected account
+ * label once the browser round trip completes. */
+export const gdriveSignIn = () => call<string>("gdrive_sign_in");
+export const gdriveSignOut = () => call<void>("gdrive_sign_out");
+export const gdriveAccount = () => call<string | null>("gdrive_account");
+
+export interface AvailableUpdate {
+  version: string;
+  notes: string | null;
+  date: string | null;
+}
+
+export interface UpdateStatus {
+  /** False on builds the package manager owns (deb/rpm/AUR). */
+  supported: boolean;
+  current_version: string;
+  available: AvailableUpdate | null;
+}
+
+export const checkUpdate = () => call<UpdateStatus>("check_update");
+/** Downloads, installs and relaunches -- does not resolve on success. */
+export const installUpdate = () => call<void>("install_update");
+
+export function onUpdateAvailable(cb: (update: AvailableUpdate) => void): Promise<UnlistenFn> {
+  return listen<AvailableUpdate>("update:available", (e) => cb(e.payload));
 }
 
 export const copyTextToClipboard = (text: string) => call<void>("copy_text_to_clipboard", { text });
@@ -321,6 +383,21 @@ export const frontendMounted = () => call<void>("frontend_mounted");
 
 export const pinReady = (label: string) => call<void>("pin_ready", { label });
 export const pinClose = (label: string) => call<void>("pin_close", { label });
+
+export interface OcrWordBox {
+  text: string;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export type ThumbnailAction = "copy" | "quicksave" | "pin" | "edit" | "upload";
+
+export const thumbnailReady = () => call<void>("thumbnail_ready");
+export const thumbnailClose = () => call<void>("thumbnail_close");
+export const thumbnailAction = (action: ThumbnailAction) =>
+  call<void>("thumbnail_action", { action });
 
 export async function pinEditorImage(pngBytes: Uint8Array): Promise<void> {
   try {

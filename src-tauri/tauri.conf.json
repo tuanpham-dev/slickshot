@@ -39,10 +39,34 @@
     ],
     "linux": {
       "deb": {
-        "depends": ["tesseract-ocr", "tesseract-ocr-eng"]
+        "depends": [
+          "tesseract-ocr",
+          "tesseract-ocr-eng"
+        ],
+        "recommends": [
+          "fonts-noto-color-emoji"
+        ]
       },
       "rpm": {
-        "depends": ["tesseract", "tesseract-langpack-eng"]
+        "depends": [
+          "tesseract",
+          "tesseract-langpack-eng"
+        ],
+        "recommends": [
+          "google-noto-emoji-color-fonts"
+        ]
+      }
+    },
+    "createUpdaterArtifacts": true
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlERkMwMzhDMzU4MjQxOQpSV1FaSkZqRE9NRGZDU1o0NnIxZmpmUVA2SHN2WksyS1JaL1ZaSkE2SXZWT0d6Tk5UT3AwNDdQWgo=",
+      "endpoints": [
+        "https://github.com/tuanpham-dev/slickshot/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
       }
     }
   }

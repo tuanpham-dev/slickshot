@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use image::ImageFormat;
+use image::{ImageEncoder, ImageFormat};
 use serde::{Deserialize, Serialize};
 use tauri_plugin_notification::NotificationExt;
 
@@ -60,7 +60,8 @@ pub fn export_commit(
             Ok(ExportResult { saved_path: None })
         }
         ExportAction::Save { path } => {
-            save_to_path(&bytes, &path)?;
+            let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+            save_encoded(&bytes, &path, Some(settings.avif_quality))?;
             notify_saved(&app, &path);
             Ok(ExportResult { saved_path: Some(path) })
         }
@@ -175,18 +176,53 @@ fn copy_text_to_clipboard_impl(text: String) -> CommandResult<()> {
     clipboard.set_text(text).map_err(|e| CommandError::Image(e.to_string()))
 }
 
-fn save_to_path(png_bytes: &[u8], path: &str) -> CommandResult<()> {
+/// Writes `png_bytes` to `path`, transcoding by the path's extension. PNG is
+/// written through untouched (it is already the working format); everything
+/// else is decoded once and re-encoded.
+///
+/// `avif_quality` is threaded in rather than read from settings here so the
+/// CLI, which loads settings off disk itself, can share this.
+pub(crate) fn save_encoded(png_bytes: &[u8], path: &str, avif_quality: Option<u8>) -> CommandResult<()> {
     let lower = path.to_lowercase();
+
     if lower.ends_with(".jpg") || lower.ends_with(".jpeg") {
         let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png)
             .map_err(|e| CommandError::Image(e.to_string()))?;
         img.to_rgb8()
             .save_with_format(path, ImageFormat::Jpeg)
             .map_err(|e| CommandError::Image(e.to_string()))?;
-    } else {
-        std::fs::write(path, png_bytes).map_err(|e| CommandError::Image(e.to_string()))?;
+        return Ok(());
     }
-    Ok(())
+
+    if lower.ends_with(".webp") {
+        let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png)
+            .map_err(|e| CommandError::Image(e.to_string()))?;
+        img.save_with_format(path, ImageFormat::WebP)
+            .map_err(|e| CommandError::Image(e.to_string()))?;
+        return Ok(());
+    }
+
+    if lower.ends_with(".avif") {
+        let img = image::load_from_memory_with_format(png_bytes, ImageFormat::Png)
+            .map_err(|e| CommandError::Image(e.to_string()))?
+            .to_rgba8();
+        let quality = avif_quality.unwrap_or(80);
+        let file = std::fs::File::create(path).map_err(|e| CommandError::Image(e.to_string()))?;
+        // AVIF encoding is materially slower than the other formats on a
+        // full-resolution capture; the UI warns about that next to the
+        // format picker rather than appearing to hang.
+        image::codecs::avif::AvifEncoder::new_with_speed_quality(file, 6, quality)
+            .write_image(
+                img.as_raw(),
+                img.width(),
+                img.height(),
+                image::ExtendedColorType::Rgba8,
+            )
+            .map_err(|e| CommandError::Image(e.to_string()))?;
+        return Ok(());
+    }
+
+    std::fs::write(path, png_bytes).map_err(|e| CommandError::Image(e.to_string()))
 }
 
 fn filename_timestamp() -> String {

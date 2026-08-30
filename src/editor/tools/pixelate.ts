@@ -11,5 +11,7 @@ export function createPixelate(id: string, start: ImgPoint, current: ImgPoint, s
     w: Math.abs(current.x - start.x),
     h: Math.abs(current.y - start.y),
     blockSize: style.pixelateBlock,
+    mode: style.censorMode,
+    color: style.censorColor,
   };
 }

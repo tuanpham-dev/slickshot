@@ -12,6 +12,7 @@ import {
   type MarkerShape,
   type RectShape,
   type TextShape,
+  ROTATE_HANDLE_OFFSET,
 } from "./types";
 
 const rect: RectShape = { id: "1", kind: "rect", x: 10, y: 20, w: 30, h: 40, stroke: "#000", fill: null, strokeWidth: 2 };
@@ -139,19 +140,61 @@ describe("hitTest", () => {
 });
 
 describe("handlesFor", () => {
-  it("returns start/end handles for endpoint shapes", () => {
+  it("returns start/end plus a curve handle for arrows", () => {
     expect(handlesFor(arrow)).toEqual([
       { id: "start", x: 10, y: 10 },
       { id: "end", x: 40, y: 30 },
+      // Straight arrow: the bend handle sits at the shaft's midpoint.
+      { id: "mid", x: 25, y: 20 },
     ]);
   });
 
-  it("returns 8 rect handles for rect-like shapes", () => {
-    expect(handlesFor(rect)).toHaveLength(8);
+  it("puts the arrow's mid handle on the control point once it is curved", () => {
+    const curved = { ...arrow, curve: { x: 60, y: 0 } };
+    expect(handlesFor(curved)).toContainEqual({ id: "mid", x: 60, y: 0 });
   });
 
-  it("returns no handles for a shape kind that is neither (text)", () => {
+  it("omits the bend handle on a banner arrow, whose shaft is always straight", () => {
+    const banner = { ...arrow, banner: true };
+    expect(handlesFor(banner).map((h) => h.id)).toEqual(["start", "end"]);
+  });
+
+  it("keeps the bend handle when the banner is switched off again", () => {
+    expect(handlesFor({ ...arrow, banner: false }).map((h) => h.id)).toContain("mid");
+  });
+
+  it("still offers the bend handle on a headless arrow -- the Line tool's shape", () => {
+    const line = { ...arrow, style: "none" as const };
+    expect(handlesFor(line).map((h) => h.id)).toEqual(["start", "end", "mid"]);
+  });
+
+  it("returns the 8 resize handles plus a rotate handle for rect-like shapes", () => {
+    const handles = handlesFor(rect);
+    expect(handles).toHaveLength(9);
+    expect(handles.filter((h) => h.id !== "rotate")).toHaveLength(8);
+    // The rotate handle floats above the top edge, centered.
+    expect(handles.find((h) => h.id === "rotate")).toEqual({
+      id: "rotate",
+      x: rect.x + rect.w / 2,
+      y: rect.y - ROTATE_HANDLE_OFFSET,
+    });
+  });
+
+  it("carries the handles around with a rotated shape", () => {
+    const turned = { ...rect, rotation: 180 };
+    const nw = handlesFor(turned).find((h) => h.id === "nw")!;
+    // Half a turn puts the top-left handle where the bottom-right corner was.
+    expect(nw.x).toBeCloseTo(rect.x + rect.w);
+    expect(nw.y).toBeCloseTo(rect.y + rect.h);
+  });
+
+  it("gives text only a rotate handle -- its size is the font slider, not a drag", () => {
     const text: TextShape = { id: "7", kind: "text", x: 0, y: 0, text: "hi", color: "#000", fontSize: 10, background: false };
-    expect(handlesFor(text)).toEqual([]);
+    expect(handlesFor(text).map((h) => h.id)).toEqual(["rotate"]);
+  });
+
+  it("gives a non-rotatable, non-boxed shape no handles at all", () => {
+    const marker: MarkerShape = { id: "8", kind: "marker", x: 50, y: 50, number: 1, color: "#000", radius: 10 };
+    expect(handlesFor(marker)).toEqual([]);
   });
 });

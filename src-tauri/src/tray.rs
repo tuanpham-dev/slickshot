@@ -10,7 +10,13 @@ use crate::images::ImageStore;
 use crate::session::CaptureSession;
 use crate::settings::{get_settings, set_settings, Settings};
 
-const DELAY_OPTIONS: [(u32, &str); 4] = [(0, "delay_0"), (3000, "delay_3"), (5000, "delay_5"), (10000, "delay_10")];
+const DELAY_OPTIONS: [(u32, &str); 5] = [
+    (0, "delay_0"),
+    (3000, "delay_3"),
+    (5000, "delay_5"),
+    (10000, "delay_10"),
+    (30000, "delay_30"),
+];
 
 /// Monochrome, transparent-background icon distinct from the app's colored
 /// window icon -- system trays typically expect a single-color glyph that
@@ -69,6 +75,7 @@ fn capture_label(mode: CaptureMode, translate_enabled: bool) -> &'static str {
         CaptureMode::RegionRepeat => "Repeat last region",
         CaptureMode::Color => "Pick color",
         CaptureMode::Measure => "Measure",
+        CaptureMode::RegionQuicksave => "Capture region to file",
     }
 }
 

@@ -36,13 +36,22 @@ import { Settings } from "./Settings";
 import { UploadHistory } from "./UploadHistory";
 import { OcrMissingDialog } from "../ui/OcrMissingDialog";
 
-type DelayOption = "0" | "3000" | "5000" | "10000";
+type DelayOption = "0" | "3000" | "5000" | "10000" | "30000";
+
+type PostCaptureOption = AppSettings["post_capture"];
+
+const POST_CAPTURE_OPTIONS: { value: PostCaptureOption; label: string }[] = [
+  { value: "editor", label: "Editor" },
+  { value: "thumbnail", label: "Thumbnail" },
+  { value: "none", label: "Nothing" },
+];
 
 const DELAY_OPTIONS: { value: DelayOption; label: string }[] = [
   { value: "0", label: "Off" },
   { value: "3000", label: "3s" },
   { value: "5000", label: "5s" },
   { value: "10000", label: "10s" },
+  { value: "30000", label: "30s" },
 ];
 
 interface ModeTileProps {
@@ -179,6 +188,7 @@ function MonitorTile({ disabled, busy, onPick }: { disabled?: boolean; busy: boo
 
 export function MainWindow() {
   const [delay, setDelayState] = useState<DelayOption>("0");
+  const [postCapture, setPostCaptureState] = useState<PostCaptureOption>("editor");
   const [settings, setLocalSettings] = useState<AppSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -216,6 +226,7 @@ export function MainWindow() {
       .then((s) => {
         setLocalSettings(s);
         setDelayState(String(s.default_delay_ms) as DelayOption);
+        setPostCaptureState(s.post_capture);
       })
       .catch(() => {});
   }
@@ -253,6 +264,15 @@ export function MainWindow() {
     setDelayState(next);
     if (settings) {
       const updated = { ...settings, default_delay_ms: Number(next) };
+      setLocalSettings(updated);
+      setSettings(updated).catch(() => {});
+    }
+  }
+
+  function handlePostCaptureChange(next: PostCaptureOption) {
+    setPostCaptureState(next);
+    if (settings) {
+      const updated = { ...settings, post_capture: next };
       setLocalSettings(updated);
       setSettings(updated).catch(() => {});
     }
@@ -418,6 +438,19 @@ export function MainWindow() {
           <div className="flex items-center justify-between">
             <span className="text-xs font-medium text-[var(--fg-muted)]">Delay</span>
             <Segmented aria-label="Capture delay" value={delay} onChange={handleDelayChange} options={DELAY_OPTIONS} />
+          </div>
+
+          {/* Alongside Delay rather than buried in Settings: both decide what
+              the very next capture does, so they belong where the capture is
+              started. */}
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-[var(--fg-muted)]">After capture</span>
+            <Segmented
+              aria-label="After capture"
+              value={postCapture}
+              onChange={handlePostCaptureChange}
+              options={POST_CAPTURE_OPTIONS}
+            />
           </div>
         </div>
         {showScrollHint && (

@@ -7,6 +7,7 @@ import { MainWindow } from "./main/MainWindow";
 import { Editor } from "./editor/Editor";
 import { Overlay } from "./overlay/Overlay";
 import { PinWindow } from "./pin/PinWindow";
+import { Thumbnail } from "./thumbnail/Thumbnail";
 
 function Router() {
   const [{ route, params }, setState] = useState(parseHashRoute());
@@ -24,6 +25,8 @@ function Router() {
       return <Overlay params={params} />;
     case "pin":
       return <PinWindow params={params} />;
+    case "thumbnail":
+      return <Thumbnail params={params} />;
     case "kit":
       return <Kit />;
     case "main":

@@ -2,22 +2,39 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Check, X } from "lucide-react";
 import { useEditorStore } from "./store";
 import { render } from "./render";
-import { clampHandles, handlesFor, rectHandles, shapeBounds, type HandleId, type ImgPoint, type MeasureLine, type RectHandleId, type Shape } from "./types";
+import {
+  clampHandles,
+  handlesFor,
+  rectHandles,
+  rotatedBounds,
+  rotationCenter,
+  rotationOf,
+  shapeBounds,
+  type HandleId,
+  type ImgPoint,
+  type MeasureLine,
+  type RectHandleId,
+  type Shape,
+} from "./types";
 import { measurementLabel, type Rgb } from "../lib/color";
 import { createRect } from "./tools/rect";
 import { createEllipse } from "./tools/ellipse";
 import { createArrow } from "./tools/arrow";
-import { createLine } from "./tools/line";
 import { startFreehand, extendFreehand } from "./tools/freehand";
-import { createHighlight } from "./tools/highlight";
+import { clusterWordsToLines, createHighlight, snapHighlightToLines } from "./tools/highlight";
 import { createPixelate } from "./tools/pixelate";
 import { createMarker } from "./tools/marker";
+import { createStamp, pushRecentStamp } from "./tools/stamp";
+import { createLoupe } from "./tools/loupe";
+import { snapShapeDrag, type AlignGuide } from "./tools/snap";
+import { applyAdjustments, isIdentity } from "./tools/adjust";
 import { createText } from "./tools/text";
 import { pickShape, pickHandle, cloneShape, moveShape, resizeShape } from "./tools/select";
 import { createSpotlight } from "./tools/spotlight";
 import { createCropRect, moveCropRect, resizeCropRect } from "./tools/crop";
 import { presetCss } from "./tools/backdrop";
 import type { PhysRect } from "../lib/geometry";
+import type { OcrWordBox } from "../lib/ipc";
 import { IconButton } from "../ui/IconButton";
 
 interface CanvasProps {
@@ -31,6 +48,11 @@ interface CanvasProps {
   /** Bakes the pending crop into the image -- owned by Editor since it's
    * the one holding the ImageBitmap this store can't touch. */
   onConfirmCrop: () => void;
+  /** Whether highlight drags should snap to OCR'd text lines. */
+  snapToText?: boolean;
+  /** Word boxes for the current image, or null while they are still being
+   * fetched -- a drag during that window stays freeform rather than waiting. */
+  textBoxes?: OcrWordBox[] | null;
 }
 
 interface DragState {
@@ -55,9 +77,30 @@ interface TextEdit {
   fontSize: number;
 }
 
-const HANDLE_HIT_CSS_PX = 10;
+/** Debounces a rapidly-changing value, for the sharpness convolution that is
+ * too costly to rerun on every slider frame. */
+function useDebounced<T>(value: T, delayMs: number): T {
+  const [settled, setSettled] = useState(value);
+  useEffect(() => {
+    const id = setTimeout(() => setSettled(value), delayMs);
+    return () => clearTimeout(id);
+  }, [value, delayMs]);
+  return settled;
+}
 
-export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onConfirmCrop }: CanvasProps) {
+const HANDLE_HIT_CSS_PX = 10;
+/** Snap pull distance, in CSS pixels so it feels the same at any zoom. */
+const SNAP_THRESHOLD_CSS_PX = 6;
+
+export function Canvas({
+  baseImage,
+  onCursorMove,
+  onOcrRegion,
+  onPickColor,
+  onConfirmCrop,
+  snapToText = false,
+  textBoxes = null,
+}: CanvasProps) {
   const baseCanvasRef = useRef<HTMLCanvasElement>(null);
   const annCanvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<DragState | null>(null);
@@ -68,6 +111,10 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
   // nothing on the render that first requests them, so without a re-render
   // they'd stay invisible until unrelated state happened to change.
   const [imageTick, setImageTick] = useState(0);
+  const [alignGuides, setAlignGuides] = useState<AlignGuide[]>([]);
+  // Bumped when the adjusted base canvas is repainted, so the annotation
+  // layer re-renders and censor/loupe shapes resample the new pixels.
+  const [baseTick, setBaseTick] = useState(0);
 
   // Explicit imperative focus, deferred to a macrotask. The textarea can't
   // use `autoFocus`: its synchronous focus-on-mount fires mid-pointerdown,
@@ -95,8 +142,10 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     ocrRect,
     measureLine,
     backdrop,
+    adjustments,
     setDraft,
     addShape,
+    addShapes,
     updateShape,
     removeShape,
     select,
@@ -106,6 +155,13 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     setMeasureLine,
   } = useEditorStore();
 
+  // The visible base canvas carries the adjustments: they must be applied
+  // here (not only at export) so the canvas shows what will be saved.
+  // Sharpness is the expensive term, so slider drags settle for `debounced`
+  // before it runs; the cheap filter terms apply on every frame.
+  const debouncedSharpness = useDebounced(adjustments.sharpness, 150);
+  const liveAdjustments = { ...adjustments, sharpness: debouncedSharpness };
+
   useEffect(() => {
     const c = baseCanvasRef.current;
     if (!c) return;
@@ -114,7 +170,25 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     const ctx = c.getContext("2d")!;
     ctx.clearRect(0, 0, c.width, c.height);
     ctx.drawImage(baseImage, 0, 0);
-  }, [baseImage, imageWidth, imageHeight]);
+    if (!isIdentity(liveAdjustments)) {
+      const adjusted = applyAdjustments(c, liveAdjustments);
+      ctx.clearRect(0, 0, c.width, c.height);
+      ctx.drawImage(adjusted, 0, 0);
+    }
+    // Shapes that sample the image (censor, loupe) read this same canvas, so
+    // they pick up the adjustments without any extra plumbing.
+    setBaseTick((n) => n + 1);
+  }, [
+    baseImage,
+    imageWidth,
+    imageHeight,
+    liveAdjustments.brightness,
+    liveAdjustments.contrast,
+    liveAdjustments.saturation,
+    liveAdjustments.sharpness,
+    liveAdjustments.invert,
+    liveAdjustments.preset,
+  ]);
 
   // Entering the Crop tool with no crop in progress starts from the full
   // image -- the user narrows it down via the resize handles instead of
@@ -137,7 +211,13 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     // textarea overlay instead, so rendering it too would double it up.
     const visible = shapes.filter((sh) => sh.id !== editingId);
     if (draft) visible.push(draft);
-    render(ctx, visible, { baseImage, selectedId, onImageLoad: () => setImageTick((n) => n + 1) });
+    render(ctx, visible, {
+      // The adjusted canvas, not the raw bitmap: a censor or loupe sampling
+      // the original would show unadjusted pixels inside an adjusted image.
+      baseImage: baseCanvasRef.current ?? baseImage,
+      selectedId,
+      onImageLoad: () => setImageTick((n) => n + 1),
+    });
 
     const selectedShape = selectedId ? shapes.find((sh) => sh.id === selectedId) : null;
     if (selectedShape) {
@@ -146,7 +226,10 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     }
     if (cropRect) {
       drawRegionOverlay(ctx, cropRect, imageWidth, imageHeight, accentColor());
-      if (tool === "crop") drawHandlesAt(ctx, clampHandles(rectHandles(cropRect), imageWidth, imageHeight));
+      if (tool === "crop") {
+        drawThirdsGrid(ctx, cropRect, zoom);
+        drawHandlesAt(ctx, clampHandles(rectHandles(cropRect), imageWidth, imageHeight));
+      }
     }
     if (ocrRect) {
       drawRegionOverlay(ctx, ocrRect, imageWidth, imageHeight, "#22c55e");
@@ -154,7 +237,10 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     if (measureLine) {
       drawMeasureLine(ctx, measureLine, zoom);
     }
-  }, [shapes, draft, baseImage, imageWidth, imageHeight, selectedId, cropRect, ocrRect, measureLine, zoom, tool, editingId, imageTick]);
+    if (alignGuides.length > 0) {
+      drawAlignGuides(ctx, alignGuides, imageWidth, imageHeight, zoom);
+    }
+  }, [shapes, draft, baseImage, imageWidth, imageHeight, selectedId, cropRect, ocrRect, measureLine, zoom, tool, editingId, imageTick, alignGuides, baseTick]);
 
   /** Colour of one image pixel *as displayed*: base bitmap with the
    * annotation layer composited over it, so picking inside a spotlight's dim
@@ -259,6 +345,14 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
       return;
     }
 
+    if (tool === "stamp") {
+      addShape(createStamp(crypto.randomUUID(), p, style));
+      // Recording on placement (not on picking) means the recents list
+      // reflects what was actually used, not what was merely browsed.
+      pushRecentStamp(style.stampEmoji);
+      return;
+    }
+
     if (tool === "eyedropper") {
       const rgb = samplePixelAt(p);
       if (rgb) onPickColor?.(rgb, e.clientX, e.clientY);
@@ -308,7 +402,21 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     if (tool === "select" && drag.moving) {
       const dx = p.x - drag.start.x;
       const dy = p.y - drag.start.y;
-      updateShape(drag.moving.shapeId, moveShape(drag.moving.origShape, dx, dy));
+      const moved = moveShape(drag.moving.origShape, dx, dy);
+      // Alt is the documented bypass, matching the region overlay's edge
+      // snapping, so a shape can always be placed at an exact free position.
+      if (e.altKey) {
+        setAlignGuides([]);
+        updateShape(drag.moving.shapeId, moved);
+        return;
+      }
+      // Rotated shapes participate through their on-screen bounding box --
+      // what the user is actually lining up is what they can see.
+      const others = shapes.filter((s) => s.id !== drag.moving!.shapeId).map(rotatedBounds);
+      const { sx } = getScale();
+      const snap = snapShapeDrag(rotatedBounds(moved), others, imageWidth, imageHeight, SNAP_THRESHOLD_CSS_PX * sx);
+      setAlignGuides(snap.guides);
+      updateShape(drag.moving.shapeId, moveShape(drag.moving.origShape, dx + snap.dx, dy + snap.dy));
       return;
     }
 
@@ -365,6 +473,9 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     if (target.hasPointerCapture?.(e.pointerId)) target.releasePointerCapture(e.pointerId);
     if (tool === "select") {
       dragRef.current = null;
+      // Guides are a live drag affordance -- leaving them drawn would read
+      // as part of the annotation.
+      setAlignGuides([]);
       return;
     }
     if (tool === "crop" || tool === "measure" || tool === "eyedropper") {
@@ -381,21 +492,53 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
     }
     const live = useEditorStore.getState().draft;
     if (live) {
-      // `live` still carries makeDraft's placeholder id "draft" (reused for
-      // every in-progress shape so it doesn't need a fresh id on every
-      // pointermove) -- assign the real id only once, on commit. Skipping
-      // this meant every drawn shape shared literal id "draft", so
-      // updateShape/removeShape (which key off shape.id) affected *all* of
-      // them at once instead of just the one being interacted with.
-      addShape({ ...live, id: crypto.randomUUID() });
+      // A snapped highlight can become several shapes (one per text line),
+      // so it commits as a batch; everything else is a single shape.
+      const snapped = live.kind === "highlight" ? snapHighlight(live) : null;
+      if (snapped && snapped.length > 0) {
+        addShapes(snapped);
+      } else {
+        // `live` still carries makeDraft's placeholder id "draft" (reused for
+        // every in-progress shape so it doesn't need a fresh id on every
+        // pointermove) -- assign the real id only once, on commit. Skipping
+        // this meant every drawn shape shared literal id "draft", so
+        // updateShape/removeShape (which key off shape.id) affected *all* of
+        // them at once instead of just the one being interacted with.
+        addShape({ ...live, id: crypto.randomUUID() });
+      }
       setDraft(null);
     }
     dragRef.current = null;
   }
 
+  /** Snapped replacements for a freeform highlight drag, or null when
+   * snapping is off, the boxes have not arrived yet, or the drag crossed no
+   * text -- in every one of those cases the caller keeps the freeform rect
+   * rather than dropping the gesture. */
+  function snapHighlight(draftShape: Shape & { kind: "highlight" }): Shape[] | null {
+    if (!snapToText) return null;
+    const boxes = textBoxes;
+    if (!boxes || boxes.length === 0) return null;
+    const rects = snapHighlightToLines(draftShape, clusterWordsToLines(boxes));
+    if (rects.length === 0) return null;
+    return rects.map((r) => ({ ...draftShape, ...r, id: crypto.randomUUID() }));
+  }
+
   function handleDoubleClick(e: React.MouseEvent) {
     if (tool !== "select") return;
     const p = toImagePoint(e);
+
+    // Double-clicking a curved arrow's control handle straightens it -- the
+    // only way back, since dragging the handle can only ever set a curve.
+    const selected = selectedId ? shapes.find((s) => s.id === selectedId) : null;
+    if (selected?.kind === "arrow" && selected.curve) {
+      const { sx } = getScale();
+      if (pickHandle(handlesFor(selected), p, HANDLE_HIT_CSS_PX * sx) === "mid") {
+        updateShape(selected.id, { curve: undefined });
+        return;
+      }
+    }
+
     const hit = pickShape(shapes, p);
     if (!hit || hit.kind !== "text") return;
     select(null);
@@ -413,7 +556,9 @@ export function Canvas({ baseImage, onCursorMove, onOcrRegion, onPickColor, onCo
         removeShape(textEdit.editingId);
       }
     } else if (textValue.trim()) {
-      addShape(createText(crypto.randomUUID(), textEdit.point, textValue, textEdit.color, textEdit.fontSize));
+      addShape(
+        createText(crypto.randomUUID(), textEdit.point, textValue, textEdit.color, textEdit.fontSize, style),
+      );
     }
     setTextEdit(null);
     setTextValue("");
@@ -596,16 +741,19 @@ function makeDraft(
       return createRect(id, start, current, style, constrain);
     case "ellipse":
       return createEllipse(id, start, current, style, constrain);
+    // Line is the Arrow tool starting from the headless style: one shape,
+    // one factory, and the head dropdown drives whichever tool is active.
     case "arrow":
-      return createArrow(id, start, current, style, constrain);
     case "line":
-      return createLine(id, start, current, style, constrain);
+      return createArrow(id, start, current, style, constrain);
     case "highlight":
       return createHighlight(id, start, current, style);
     case "pixelate":
       return createPixelate(id, start, current, style);
     case "spotlight":
       return createSpotlight(id, start, current, style);
+    case "loupe":
+      return createLoupe(id, start, current, style);
     default:
       return null;
   }
@@ -629,6 +777,15 @@ function accentColor(): string {
 function drawSelectionOutline(ctx: CanvasRenderingContext2D, s: Shape) {
   const b = shapeBounds(s);
   ctx.save();
+  // The outline turns with the shape, so it keeps hugging the shape's own
+  // edges rather than growing into a loose axis-aligned box around it.
+  const rotation = rotationOf(s);
+  if (rotation !== 0) {
+    const c = rotationCenter(s);
+    ctx.translate(c.x, c.y);
+    ctx.rotate((rotation * Math.PI) / 180);
+    ctx.translate(-c.x, -c.y);
+  }
   ctx.strokeStyle = accentColor();
   ctx.setLineDash([4, 3]);
   ctx.lineWidth = 1;
@@ -640,7 +797,7 @@ function drawHandles(ctx: CanvasRenderingContext2D, s: Shape) {
   drawHandlesAt(ctx, handlesFor(s));
 }
 
-function drawHandlesAt(ctx: CanvasRenderingContext2D, handles: { x: number; y: number }[]) {
+function drawHandlesAt(ctx: CanvasRenderingContext2D, handles: { id?: HandleId; x: number; y: number }[]) {
   if (handles.length === 0) return;
   const size = 8;
   ctx.save();
@@ -650,8 +807,63 @@ function drawHandlesAt(ctx: CanvasRenderingContext2D, handles: { x: number; y: n
     ctx.strokeStyle = accent;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
-    ctx.rect(h.x - size / 2, h.y - size / 2, size, size);
+    // The rotate handle is round so it reads as a different kind of grip
+    // than the square resize handles it sits next to.
+    if (h.id === "rotate") {
+      ctx.arc(h.x, h.y, size / 2, 0, Math.PI * 2);
+    } else {
+      ctx.rect(h.x - size / 2, h.y - size / 2, size, size);
+    }
     ctx.fill();
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** Rule-of-thirds guides inside the crop rect. Editing chrome only: the
+ * export re-renders shapes without any of this (see `flattenToPng`). */
+function drawThirdsGrid(ctx: CanvasRenderingContext2D, rect: PhysRect, zoom: number) {
+  ctx.save();
+  ctx.strokeStyle = accentColor();
+  ctx.globalAlpha = 0.35;
+  ctx.lineWidth = 1 / Math.max(zoom, 0.01);
+  for (let i = 1; i <= 2; i++) {
+    const x = rect.x + (rect.w * i) / 3;
+    const y = rect.y + (rect.h * i) / 3;
+    ctx.beginPath();
+    ctx.moveTo(x, rect.y);
+    ctx.lineTo(x, rect.y + rect.h);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(rect.x, y);
+    ctx.lineTo(rect.x + rect.w, y);
+    ctx.stroke();
+  }
+  ctx.restore();
+}
+
+/** Alignment guides shown while a shape is being dragged into line with
+ * another. Line width is divided by `zoom` so the guide stays hairline-thin
+ * on screen regardless of how far the capture is zoomed. */
+function drawAlignGuides(
+  ctx: CanvasRenderingContext2D,
+  guides: AlignGuide[],
+  imageWidth: number,
+  imageHeight: number,
+  zoom: number,
+) {
+  ctx.save();
+  ctx.strokeStyle = accentColor();
+  ctx.lineWidth = 1 / Math.max(zoom, 0.01);
+  for (const g of guides) {
+    ctx.beginPath();
+    if (g.axis === "x") {
+      ctx.moveTo(g.position, 0);
+      ctx.lineTo(g.position, imageHeight);
+    } else {
+      ctx.moveTo(0, g.position);
+      ctx.lineTo(imageWidth, g.position);
+    }
     ctx.stroke();
   }
   ctx.restore();

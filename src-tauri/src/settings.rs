@@ -12,6 +12,29 @@ pub(crate) const STORE_KEY: &str = "settings";
 pub enum ImageFormat {
     Png,
     Jpg,
+    /// Encoded losslessly -- the lossy encoder needs libwebp, which would add
+    /// a C dependency to the build; lossless WebP still beats PNG on size.
+    Webp,
+    Avif,
+}
+
+/// What happens once a capture lands. Replaces the older
+/// `open_editor_after_capture` boolean, which is still read from disk for
+/// backfill (see `parse_settings_value`) but no longer drives behavior.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PostCaptureAction {
+    /// Open the annotation editor (the long-standing behavior).
+    #[default]
+    Editor,
+    /// Show the floating thumbnail with quick actions.
+    Thumbnail,
+    /// Keep the capture only if `copy_on_capture` puts it on the clipboard.
+    None,
+}
+
+fn default_post_capture() -> PostCaptureAction {
+    PostCaptureAction::default()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -29,6 +52,10 @@ pub enum UploadProvider {
     /// Any S3-compatible object store (AWS S3, MinIO, Cloudflare R2,
     /// Backblaze B2), configured via the `s3_*` settings below.
     S3,
+    /// Anonymous-ish hosting via an API key from api.imgbb.com.
+    Imgbb,
+    /// The user's own Google Drive, via an OAuth client they create.
+    Gdrive,
     /// Falls back here for any value serde doesn't recognize -- notably
     /// `"0x0"`, valid in a `settings.json` saved while that provider
     /// briefly existed (dropped as unreliable; see upload.rs history).
@@ -59,6 +86,14 @@ fn default_export_scale() -> u8 {
     100
 }
 
+fn default_avif_quality() -> u8 {
+    80
+}
+
+fn default_auto_check_updates() -> bool {
+    true
+}
+
 /// Parses `hotkeys` leniently: each array element that fails to deserialize
 /// (most commonly a `mode` value naming a `CaptureMode` variant that has
 /// since been removed, e.g. a retired capture mode) is silently dropped
@@ -84,11 +119,19 @@ pub struct Settings {
     pub save_dir: Option<String>,
     pub default_format: ImageFormat,
     pub jpeg_quality: u8,
+    /// Separate from `jpeg_quality`: the two codecs behave differently
+    /// enough at a given number that one slider would mistune the other.
+    #[serde(default = "default_avif_quality")]
+    pub avif_quality: u8,
     #[serde(deserialize_with = "deserialize_hotkeys")]
     pub hotkeys: Vec<HotkeyBinding>,
     pub default_delay_ms: u32,
+    /// Superseded by `post_capture`; kept so an old `settings.json` still
+    /// round-trips and can be backfilled from.
     pub open_editor_after_capture: bool,
     pub copy_on_capture: bool,
+    #[serde(default = "default_post_capture")]
+    pub post_capture: PostCaptureAction,
     pub theme: ThemeOverride,
     /// Master switch for OCR translation: OFF by default -- enabling it
     /// sends OCR'd text to Google's translate endpoint, which should be an
@@ -108,6 +151,16 @@ pub struct Settings {
     /// required only when `upload_provider` is `Imgur`.
     #[serde(default)]
     pub imgur_client_id: String,
+    /// API key for imgbb (https://api.imgbb.com), required only when
+    /// `upload_provider` is `Imgbb`. Stored in plaintext, like the others.
+    #[serde(default)]
+    pub imgbb_api_key: String,
+    /// OAuth client ID for Google Drive, from the user's own Google Cloud
+    /// project (a "Desktop app" credential). Required only when
+    /// `upload_provider` is `Gdrive`; the refresh token lives in its own
+    /// `gdrive.json` store rather than here.
+    #[serde(default)]
+    pub gdrive_client_id: String,
     /// Percent of native size exports are scaled to (100 = untouched).
     #[serde(default = "default_export_scale")]
     pub export_scale: u8,
@@ -131,6 +184,10 @@ pub struct Settings {
     pub s3_key_prefix: String,
     #[serde(default)]
     pub s3_public_base: String,
+    /// Check GitHub Releases for a newer version shortly after launch.
+    /// Ignored by the deb/rpm/AUR builds, which the package manager owns.
+    #[serde(default = "default_auto_check_updates")]
+    pub auto_check_updates: bool,
 }
 
 impl Default for Settings {
@@ -139,16 +196,20 @@ impl Default for Settings {
             save_dir: None,
             default_format: ImageFormat::Png,
             jpeg_quality: 90,
+            avif_quality: default_avif_quality(),
             hotkeys: hotkeys::default_bindings(),
             default_delay_ms: 0,
             open_editor_after_capture: true,
             copy_on_capture: false,
+            post_capture: PostCaptureAction::default(),
             theme: ThemeOverride::System,
             translate_enabled: false,
             translate_target: default_translate_target(),
             ocr_lang: default_ocr_lang(),
             upload_provider: UploadProvider::default(),
             imgur_client_id: String::new(),
+            imgbb_api_key: String::new(),
+            gdrive_client_id: String::new(),
             export_scale: default_export_scale(),
             s3_endpoint: String::new(),
             s3_region: String::new(),
@@ -157,6 +218,7 @@ impl Default for Settings {
             s3_secret_key: String::new(),
             s3_key_prefix: String::new(),
             s3_public_base: String::new(),
+            auto_check_updates: default_auto_check_updates(),
         }
     }
 }
@@ -167,9 +229,23 @@ impl Default for Settings {
 /// disk directly rather than through a `tauri_plugin_store` handle, can
 /// share the exact same parsing behavior instead of duplicating it.
 pub(crate) fn parse_settings_value(value: serde_json::Value) -> CommandResult<Settings> {
+    // Whether the file predates `post_capture` has to be read off the raw
+    // JSON: by the time it's a `Settings` the serde default has already
+    // filled in `Editor`, indistinguishable from an explicit choice.
+    let had_post_capture = value.get("post_capture").is_some();
+    let legacy_open_editor = value
+        .get("open_editor_after_capture")
+        .and_then(|v| v.as_bool());
+
     let mut settings: Settings =
         serde_json::from_value(value).map_err(|e| CommandError::Image(e.to_string()))?;
     fill_missing_hotkeys(&mut settings);
+
+    // An old file that had opted *out* of the editor keeps that intent as
+    // `None`; anything else lands on the `Editor` default.
+    if !had_post_capture && legacy_open_editor == Some(false) {
+        settings.post_capture = PostCaptureAction::None;
+    }
     Ok(settings)
 }
 
@@ -314,6 +390,62 @@ mod tests {
         assert_eq!(settings.hotkeys[0].mode, CaptureMode::Region);
     }
 
+    /// A `settings.json` predating `post_capture` that had the editor
+    /// enabled must land on the `Editor` default -- the behavior those users
+    /// already had.
+    #[test]
+    fn old_settings_without_post_capture_default_to_editor() {
+        let old_json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": true,
+            "copy_on_capture": false,
+            "theme": "system"
+        });
+        let settings = parse_settings_value(old_json).expect("old settings.json must still parse");
+        assert_eq!(settings.post_capture, PostCaptureAction::Editor);
+    }
+
+    /// The same file with the editor turned *off* must keep that intent
+    /// rather than silently start opening the editor again.
+    #[test]
+    fn legacy_open_editor_false_backfills_to_none() {
+        let old_json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": false,
+            "copy_on_capture": true,
+            "theme": "system"
+        });
+        let settings = parse_settings_value(old_json).expect("old settings.json must still parse");
+        assert_eq!(settings.post_capture, PostCaptureAction::None);
+    }
+
+    /// An explicit `post_capture` always wins over the legacy boolean, so a
+    /// user who picks "open editor" after having opted out stays opted in.
+    #[test]
+    fn explicit_post_capture_wins_over_legacy_boolean() {
+        let json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": false,
+            "copy_on_capture": false,
+            "theme": "system",
+            "post_capture": "thumbnail"
+        });
+        let settings = parse_settings_value(json).expect("settings.json must parse");
+        assert_eq!(settings.post_capture, PostCaptureAction::Thumbnail);
+    }
+
     /// Reproduces the real bug found in QA: a `settings.json` saved before
     /// the Translate hotkey existed keeps its old 3-entry `hotkeys` array
     /// verbatim on deserialize (plain `Vec`, not per-field defaulted), so
@@ -331,6 +463,12 @@ mod tests {
         };
         fill_missing_hotkeys(&mut settings);
         assert!(settings.hotkeys.iter().any(|h| h.mode == CaptureMode::Translate));
+        // Same backfill must reach every mode added since, or its shortcut
+        // would never be assignable for an upgrading user.
+        assert!(settings
+            .hotkeys
+            .iter()
+            .any(|h| h.mode == CaptureMode::RegionQuicksave));
         // still exactly one binding per mode -- no duplicates introduced
         assert_eq!(settings.hotkeys.iter().filter(|h| h.mode == CaptureMode::Region).count(), 1);
     }

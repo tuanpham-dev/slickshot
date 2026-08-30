@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { ArrowShape, RectShape } from "../types";
-import { cloneShape, moveShape, pickHandle, pickShape, resizeBounds, resizeShape } from "./select";
+import { cloneShape, moveShape, pickHandle, pickShape, resizeBounds, resizeShape, mirrorShape } from "./select";
 
 const rect: RectShape = { id: "1", kind: "rect", x: 10, y: 10, w: 20, h: 20, stroke: "#000", fill: null, strokeWidth: 2 };
 
@@ -167,5 +167,55 @@ describe("resizeShape", () => {
   it("is a no-op for a shape kind with no handles (text)", () => {
     const text = { id: "t", kind: "text" as const, x: 0, y: 0, text: "hi", color: "#000", fontSize: 10, background: false };
     expect(resizeShape(text, "se", { x: 100, y: 100 }, false)).toEqual(text);
+  });
+});
+
+describe("mirrorShape", () => {
+  const W = 200;
+  const H = 100;
+
+  it("re-anchors a box shape by its far edge", () => {
+    const rect = { id: "1", kind: "rect" as const, x: 10, y: 20, w: 40, h: 30, stroke: "#000", fill: null, strokeWidth: 2 };
+    expect(mirrorShape(rect, "h", W, H)).toMatchObject({ x: 150, y: 20, w: 40, h: 30 });
+    expect(mirrorShape(rect, "v", W, H)).toMatchObject({ x: 10, y: 50, w: 40, h: 30 });
+  });
+
+  it("swaps an arrow's endpoints across the axis and carries its curve", () => {
+    const arrow = {
+      id: "2", kind: "arrow" as const, x1: 10, y1: 10, x2: 40, y2: 30,
+      stroke: "#000", strokeWidth: 2, curve: { x: 25, y: 0 },
+    };
+    const flipped = mirrorShape(arrow, "h", W, H);
+    expect(flipped).toMatchObject({ x1: 190, x2: 160, y1: 10, y2: 30 });
+    expect(flipped).toMatchObject({ curve: { x: 175, y: 0 } });
+  });
+
+  it("mirrors a freehand path point by point", () => {
+    const freehand = {
+      id: "3", kind: "freehand" as const,
+      points: [{ x: 0, y: 0 }, { x: 50, y: 25 }],
+      stroke: "#000", strokeWidth: 1,
+    };
+    expect(mirrorShape(freehand, "h", W, H)).toMatchObject({
+      points: [{ x: 200, y: 0 }, { x: 150, y: 25 }],
+    });
+  });
+
+  it("moves point-anchored shapes by their point alone", () => {
+    const marker = { id: "4", kind: "marker" as const, x: 60, y: 40, number: 1, color: "#000", radius: 10 };
+    expect(mirrorShape(marker, "h", W, H)).toMatchObject({ x: 140, y: 40 });
+  });
+
+  it("reverses rotation, since the mirrored image turns the other way", () => {
+    const rect = {
+      id: "5", kind: "rect" as const, x: 10, y: 20, w: 40, h: 30,
+      stroke: "#000", fill: null, strokeWidth: 2, rotation: 30,
+    };
+    expect(mirrorShape(rect, "h", W, H)).toMatchObject({ rotation: 330 });
+  });
+
+  it("leaves an unrotated shape's rotation alone", () => {
+    const rect = { id: "6", kind: "rect" as const, x: 10, y: 20, w: 40, h: 30, stroke: "#000", fill: null, strokeWidth: 2 };
+    expect((mirrorShape(rect, "h", W, H) as { rotation?: number }).rotation).toBeUndefined();
   });
 });

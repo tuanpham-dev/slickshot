@@ -89,6 +89,33 @@ Everything below is platform-generic code (no `cfg(target_os)` branch), so it sh
 - [ ] With the app **not** running: `region`/`window`/`open` cold-start it, the capture happens, and the app stays resident afterward (check the tray)
 - [ ] Windows only: console output actually reaches the terminal (see Known risk area — `AttachConsole`)
 
+### OCR word boxes and face detection (per-platform)
+
+`ocr_boxes` is what Redact-personal-data and the highlighter's snap-to-text
+are built on. Its Linux arm (tesseract TSV) has unit coverage; the macOS
+(Vision `boundingBoxForRange:`) and Windows (`OcrWord.BoundingRect`) arms are
+compile-checked only and need a live pass:
+
+- [ ] Editor > **Redact personal data** on a screenshot containing an email, a
+      phone number and a card number covers all three and nothing else
+- [ ] Highlighter with **Snap to text** on: a rough drag across a paragraph
+      snaps to the text lines, and a multi-line drag produces one highlight
+      per line that undoes as a single step
+- [ ] With no OCR engine available, both entry points are dimmed rather than
+      failing on use
+
+Face detection is platform-independent (bundled SeetaFace model, pure Rust),
+and was verified on Linux against real frontal portraits -- a photo and a
+painted portrait -- with the box landing on the face in both. No photo is
+committed as a fixture, so re-verify with any portrait if the detector or its
+thresholds change:
+
+- [ ] Editor > **Censor faces** on a portrait covers the face (including hair
+      and chin, via the 15% padding) and leaves the rest of the image alone
+- [ ] The censor is strong enough to be unrecognizable on a large face -- the
+      block size scales with the face, so it should not depend on the slider
+- [ ] An image with no faces reports "No faces found" rather than erroring
+
 ## Reporting results
 
 For each finding: platform + OS version, what was tested, expected vs. actual, and — for anything under "Known risk areas" — whether it needed a code change or was just a documentation gap. A clean pass on everything above is itself useful information: it means "Known limitations" in the README can drop its Windows/macOS caveat.

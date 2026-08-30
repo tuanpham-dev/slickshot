@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { HANDLES, handlePhysPositions, pickHandle, resizeRect } from "./resize";
+import {
+  constrainToAspect,
+  HANDLES,
+  handlePhysPositions,
+  pickHandle,
+  resizeRect,
+  snapRectToEdges,
+} from "./resize";
 
 describe("HANDLES", () => {
   it("declares exactly the 8 corner/edge handles", () => {
@@ -59,5 +66,80 @@ describe("resizeRect", () => {
     const a = resizeRect(orig, "sw", { x: -20, y: 60 });
     const b = resizeBounds(orig, "sw", { x: -20, y: 60 }, false);
     expect(a).toEqual(b);
+  });
+});
+
+describe("constrainToAspect", () => {
+  it("leaves the rect untouched when freeform", () => {
+    const rect = { x: 10, y: 20, w: 130, h: 45 };
+    expect(constrainToAspect(rect, null, { x: 10, y: 20 })).toEqual(rect);
+  });
+
+  it("squares the rect for 1:1, keeping the anchor corner pinned", () => {
+    const out = constrainToAspect({ x: 0, y: 0, w: 100, h: 40 }, "1:1", { x: 0, y: 0 });
+    expect(out).toEqual({ x: 0, y: 0, w: 100, h: 100 });
+  });
+
+  it("applies 16:9 and 9:16 as width:height", () => {
+    const wide = constrainToAspect({ x: 0, y: 0, w: 160, h: 10 }, "16:9", { x: 0, y: 0 });
+    expect(wide.w / wide.h).toBeCloseTo(16 / 9, 1);
+    const tall = constrainToAspect({ x: 0, y: 0, w: 90, h: 10 }, "9:16", { x: 0, y: 0 });
+    expect(tall.w / tall.h).toBeCloseTo(9 / 16, 1);
+  });
+
+  it("keeps 4:3 growing up-left when the anchor is the bottom-right corner", () => {
+    // anchor at (200,200), rect drawn back toward the origin
+    const out = constrainToAspect({ x: 100, y: 140, w: 100, h: 60 }, "4:3", { x: 200, y: 200 });
+    expect(out.x + out.w).toBe(200);
+    expect(out.y + out.h).toBe(200);
+    expect(out.w / out.h).toBeCloseTo(4 / 3, 1);
+  });
+
+  it("tracks the axis the pointer moved furthest on", () => {
+    // height (60 * 1 = 60) exceeds width (20), so the square takes the height
+    const out = constrainToAspect({ x: 0, y: 0, w: 20, h: 60 }, "1:1", { x: 0, y: 0 });
+    expect(out.w).toBe(60);
+  });
+});
+
+describe("snapRectToEdges", () => {
+  const windows = [{ x: 100, y: 100, w: 400, h: 300 }];
+
+  it("snaps an edge that lands within the threshold", () => {
+    const { rect, guides } = snapRectToEdges({ x: 103, y: 200, w: 50, h: 50 }, windows, 8);
+    expect(rect.x).toBe(100);
+    expect(guides).toContainEqual({ axis: "x", position: 100 });
+  });
+
+  it("leaves edges outside the threshold alone", () => {
+    const { rect, guides } = snapRectToEdges({ x: 140, y: 200, w: 50, h: 50 }, windows, 8);
+    expect(rect.x).toBe(140);
+    expect(guides).toHaveLength(0);
+  });
+
+  it("snaps the right edge to a window's right edge", () => {
+    const { rect } = snapRectToEdges({ x: 300, y: 200, w: 196, h: 50 }, windows, 8);
+    expect(rect.x + rect.w).toBe(500);
+  });
+
+  it("moves only the closer edge on each axis", () => {
+    // left edge is 2px from 100; right edge is 6px from 500 -- left wins,
+    // and the right edge must stay exactly where it was
+    const { rect } = snapRectToEdges({ x: 102, y: 200, w: 392, h: 50 }, windows, 8);
+    expect(rect.x).toBe(100);
+    expect(rect.x + rect.w).toBe(494);
+  });
+
+  it("respects the moving-edge mask so a handle drag can't move its anchor", () => {
+    const moving = { left: false, right: true, top: false, bottom: true };
+    const { rect } = snapRectToEdges({ x: 103, y: 200, w: 50, h: 50 }, windows, 8, moving);
+    expect(rect.x).toBe(103);
+  });
+
+  it("snaps both axes independently", () => {
+    const { rect, guides } = snapRectToEdges({ x: 103, y: 104, w: 50, h: 50 }, windows, 8);
+    expect(rect.x).toBe(100);
+    expect(rect.y).toBe(100);
+    expect(guides).toHaveLength(2);
   });
 });

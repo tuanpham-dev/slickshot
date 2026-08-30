@@ -2,7 +2,13 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Capability for all app windows",
-  "windows": ["main", "editor", "overlay-*", "pin-*"],
+  "windows": [
+    "main",
+    "editor",
+    "overlay-*",
+    "pin-*",
+    "thumbnail"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-close",
@@ -27,6 +33,8 @@
     "global-shortcut:default",
     "dialog:default",
     "store:default",
-    "notification:default"
+    "notification:default",
+    "updater:default",
+    "process:allow-restart"
   ]
 }

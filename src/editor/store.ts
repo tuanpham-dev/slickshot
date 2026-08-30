@@ -1,7 +1,8 @@
 import { create } from "zustand";
 import type { PhysRect } from "../lib/geometry";
-import type { Backdrop, MeasureLine, Shape, Style, ToolId } from "./types";
-import { cloneShape, moveShape } from "./tools/select";
+import type { Adjustments, Backdrop, MeasureLine, Shape, Style, ToolId } from "./types";
+import { IDENTITY_ADJUSTMENTS } from "./tools/adjust";
+import { cloneShape, mirrorShape, moveShape } from "./tools/select";
 import { renumberMarkers } from "./tools/marker";
 
 /** One undo step. Backdrop rides along with the shapes so toggling or
@@ -9,6 +10,7 @@ import { renumberMarkers } from "./tools/marker";
 interface HistoryEntry {
   shapes: Shape[];
   backdrop: Backdrop;
+  adjustments: Adjustments;
 }
 
 interface EditorState {
@@ -21,11 +23,18 @@ interface EditorState {
   tool: ToolId;
   style: Style;
   backdrop: Backdrop;
-  /** Percent of native size the export is scaled to (100 = untouched). */
-  exportScale: number;
+  adjustments: Adjustments;
+  /** Explicit output dimensions for the exported image, or null to save at
+   * the image's own size. Set from the Adjust panel's Resize field. */
+  resize: { w: number; h: number } | null;
   past: HistoryEntry[];
   future: HistoryEntry[];
   zoom: number;
+  /** Whether the Adjust panel has taken over the properties panel. Lives in
+   * the store rather than the Editor because every action that changes what
+   * the panel should show -- picking a tool, selecting a shape -- has to
+   * clear it, and doing that in one place is what keeps them consistent. */
+  adjustOpen: boolean;
   cropRect: PhysRect | null;
   ocrRect: PhysRect | null;
   measureLine: MeasureLine | null;
@@ -35,10 +44,20 @@ interface EditorState {
   setTool: (tool: ToolId) => void;
   setStyle: (partial: Partial<Style>) => void;
   setBackdrop: (partial: Partial<Backdrop>) => void;
-  setExportScale: (percent: number) => void;
+  setAdjustments: (partial: Partial<Adjustments>) => void;
+  /** Mirrors `applyCrop`: bakes a horizontal or vertical flip into every
+   * shape's coordinates. The caller replaces the base bitmap itself. */
+  flipImage: (axis: "h" | "v") => void;
+  setResize: (size: { w: number; h: number } | null) => void;
+  setAdjustOpen: (open: boolean) => void;
   setDraft: (shape: Shape | null) => void;
   commitDraft: () => void;
   addShape: (shape: Shape) => void;
+  /** Adds several shapes as a single undo step -- for actions that produce a
+   * variable number of shapes at once (auto-redaction, snapped multi-line
+   * highlights), where undoing should remove the whole batch rather than
+   * peel it back one shape at a time. */
+  addShapes: (shapes: Shape[]) => void;
   updateShape: (id: string, partial: Partial<Shape>) => void;
   removeShape: (id: string) => void;
   select: (id: string | null) => void;
@@ -63,7 +82,18 @@ const DEFAULT_STYLE: Style = {
   strokeWidth: 3,
   fontSize: 20,
   opacity: 1,
+  arrowStyle: "single",
+  arrowBanner: false,
+  textBold: false,
+  textItalic: false,
+  textUnderline: false,
+  textAlign: "left",
+  textBgColor: null,
+  stampEmoji: "✅",
+  loupeFactor: 2,
   pixelateBlock: 12,
+  censorMode: "pixelate",
+  censorColor: "#000000",
   markerSize: 14,
   spotlightDim: 0.6,
   spotlightForm: "rect",
@@ -78,8 +108,12 @@ const DEFAULT_BACKDROP: Backdrop = {
   shadow: true,
 };
 
-function snapshot(state: { shapes: Shape[]; backdrop: Backdrop }): HistoryEntry {
-  return { shapes: state.shapes.map((s) => ({ ...s })), backdrop: { ...state.backdrop } };
+function snapshot(state: { shapes: Shape[]; backdrop: Backdrop; adjustments: Adjustments }): HistoryEntry {
+  return {
+    shapes: state.shapes.map((s) => ({ ...s })),
+    backdrop: { ...state.backdrop },
+    adjustments: { ...state.adjustments },
+  };
 }
 
 export const useEditorStore = create<EditorState>((set, get) => ({
@@ -92,10 +126,12 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   tool: "select",
   style: DEFAULT_STYLE,
   backdrop: DEFAULT_BACKDROP,
-  exportScale: 100,
+  adjustments: IDENTITY_ADJUSTMENTS,
+  resize: null,
   past: [],
   future: [],
   zoom: 1,
+  adjustOpen: false,
   cropRect: null,
   ocrRect: null,
   measureLine: null,
@@ -119,16 +155,33 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ocrRect: null,
       measureLine: null,
       dirty: false,
+      adjustOpen: false,
       backdrop: DEFAULT_BACKDROP,
+      adjustments: IDENTITY_ADJUSTMENTS,
+      resize: null,
     }),
+  setAdjustOpen: (open) => set({ adjustOpen: open }),
+
   setTool: (tool) =>
-    set({
+    set((s) => ({
       tool,
-      selectedId: tool === "select" ? get().selectedId : null,
+      // Picking a tool means wanting that tool's settings, so Adjust yields.
+      adjustOpen: false,
+      selectedId: tool === "select" ? s.selectedId : null,
       // The measurement is a read-out for the measure tool specifically;
       // leaving it drawn under another tool reads as a stray annotation.
-      measureLine: tool === "measure" ? get().measureLine : null,
-    }),
+      measureLine: tool === "measure" ? s.measureLine : null,
+      // Line and Arrow draw the same shape, so picking one only sets which
+      // head you start from. Arrow leaves an existing head alone -- someone
+      // who chose "double" keeps it -- and only steps in when the current
+      // head would make it indistinguishable from the Line tool.
+      style:
+        tool === "line"
+          ? { ...s.style, arrowStyle: "none" as const }
+          : tool === "arrow" && s.style.arrowStyle === "none"
+            ? { ...s.style, arrowStyle: "single" as const }
+            : s.style,
+    })),
   setStyle: (partial) => set((s) => ({ style: { ...s.style, ...partial } })),
 
   setBackdrop: (partial) =>
@@ -139,7 +192,15 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       dirty: true,
     })),
 
-  setExportScale: (percent) => set({ exportScale: percent }),
+  setAdjustments: (partial) =>
+    set((s) => ({
+      adjustments: { ...s.adjustments, ...partial },
+      past: [...s.past, snapshot(s)],
+      future: [],
+      dirty: true,
+    })),
+
+  setResize: (size) => set({ resize: size, dirty: true }),
   setDraft: (shape) => set({ draft: shape }),
 
   commitDraft: () => {
@@ -162,6 +223,20 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       selectedId: shape.id,
     })),
 
+  addShapes: (incoming) =>
+    set((s) => {
+      if (incoming.length === 0) return s;
+      return {
+        shapes: renumberMarkers([...s.shapes, ...incoming]),
+        past: [...s.past, snapshot(s)],
+        future: [],
+        dirty: true,
+        // A batch has no single subject to select; selecting the last one
+        // would imply the others aren't part of the same action.
+        selectedId: null,
+      };
+    }),
+
   updateShape: (id, partial) =>
     set((s) => ({
       shapes: s.shapes.map((sh) => (sh.id === id ? ({ ...sh, ...partial } as Shape) : sh)),
@@ -177,7 +252,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       dirty: true,
     })),
 
-  select: (id) => set({ selectedId: id }),
+  // Selecting a shape asks for that shape's properties, so Adjust yields --
+  // including when the same shape is clicked again, which a check on
+  // `selectedId` changing would miss.
+  select: (id) => set(id === null ? { selectedId: id } : { selectedId: id, adjustOpen: false }),
 
   duplicateSelected: () => {
     const s = get();
@@ -193,6 +271,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         shapes: previous.shapes,
         backdrop: previous.backdrop,
+        adjustments: previous.adjustments,
         past: s.past.slice(0, -1),
         future: [snapshot(s), ...s.future],
         selectedId: null,
@@ -207,6 +286,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       return {
         shapes: next.shapes,
         backdrop: next.backdrop,
+        adjustments: next.adjustments,
         past: [...s.past, snapshot(s)],
         future: s.future.slice(1),
         selectedId: null,
@@ -238,6 +318,21 @@ export const useEditorStore = create<EditorState>((set, get) => ({
         dirty: true,
       };
     }),
+
+  // Baked immediately, like `applyCrop` rather than kept as pending state:
+  // a flip the canvas doesn't show until export reads as broken, even when
+  // the exported file is correct.
+  flipImage: (axis) =>
+    set((s) => ({
+      shapes: s.shapes.map((sh) => mirrorShape(sh, axis, s.imageWidth, s.imageHeight)),
+      // Pre-flip history holds coordinates in the un-mirrored frame; replaying
+      // it would put every shape on the wrong side. Same reasoning as the
+      // history reset in `applyCrop`.
+      past: [],
+      future: [],
+      selectedId: null,
+      dirty: true,
+    })),
 
   setOcrRect: (rect) => set({ ocrRect: rect }),
 

@@ -83,6 +83,18 @@ body {
   }
 }
 
+/* The editor toolbar's tool row scrolls when the window is too narrow to
+   hold every tool. A visible scrollbar would eat into the 64px toolbar and
+   push the icons off-center, so it is hidden -- the row still scrolls by
+   wheel, trackpad and keyboard. */
+.slickshot-toolbar-scroll {
+  scrollbar-width: none;
+}
+
+.slickshot-toolbar-scroll::-webkit-scrollbar {
+  display: none;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

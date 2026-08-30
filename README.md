@@ -6,16 +6,22 @@ A multi-platform screenshot capture and annotation tool built with Tauri 2 + Rea
 
 ## Features
 
-- **Capture modes:** region (drag-select, can span monitors), full screen, single monitor, window, repeat last region, pick a color off the screen, measure a distance, and translate/extract text from a dragged region
-- **Delay:** off / 3s / 5s / 10s
-- **Annotation editor toolbar:** select, rectangle, ellipse, arrow, line, freehand, text, highlighter, pixelate, spotlight (dim everything outside a shape), numbered markers, crop, extract text (OCR), pick color, measure — plus insert image and a gradient/solid-color backdrop — all with undo/redo
-- **Text extraction:** drag a region to OCR it (native **Vision** on macOS, native **Windows.Media.Ocr** on Windows, **Tesseract** on Linux), decode any QR codes in the same region, and optionally translate the result — from the toolbar's Extract-text tool, the main window's Translate/Extract-text mode, or the CLI's `ocr`/`qr` commands
-- **Export:** copy to clipboard, Save As, Quick save to a configured folder, or upload to Imgur / an S3-compatible bucket / catbox.moe (with local upload history and one-click delete for providers that support it); export size can be scaled to 100/75/50/33%
-- **Pin to screen:** float a region as an always-on-top window — drag to move, scroll to resize, Esc to close — for comparing a capture against what's underneath it
+- **Capture modes:** region (drag-select, can span monitors), full screen, single monitor, window, repeat last region, region straight to a file (skipping the editor), pick a color off the screen, measure a distance, and translate/extract text from a dragged region
+- **Region selection helpers:** lock the drag to a 1:1 / 4:3 / 16:9 / 9:16 aspect, type exact pixel dimensions, and snap edges to nearby window borders (hold `Alt` to bypass)
+- **Delay:** off / 3s / 5s / 10s / 30s
+- **After a capture:** open the editor, show a floating thumbnail with Copy / Save / Pin / Edit / Upload and an auto-dismiss timer, or do nothing -- and optionally copy to the clipboard either way
+- **Annotation editor toolbar:** select, rectangle, ellipse, arrow, line, freehand, text, highlighter, censor, spotlight (dim everything outside a shape), numbered markers, crop, extract text (OCR), pick color, measure, emoji stamp, magnifier -- plus insert image, a gradient/solid-color backdrop, image adjustments, redact personal data and censor faces -- all with undo/redo
+- **Shape editing:** rotate any shape (Shift snaps to 15 degrees), alignment guides while dragging, five arrow styles with optional curvature, rich text (bold/italic/underline, alignment, background color), and a rule-of-thirds grid while cropping
+- **Censor:** pixelate, blur or solid fill; **Redact personal data** finds emails, phone numbers, card numbers (Luhn-checked) and API keys via OCR and covers them; **Censor faces** detects faces on-device
+- **Image adjustments:** brightness, contrast, saturation, sharpness, invert, flip horizontally/vertically, and Noir / Mono / Sepia / Fade / Vivid presets -- applied live and identically on export
+- **Text extraction:** drag a region to OCR it (native **Vision** on macOS, native **Windows.Media.Ocr** on Windows, **Tesseract** on Linux), decode any QR codes in the same region, and optionally translate the result -- from the toolbar's Extract-text tool, the main window's Translate/Extract-text mode, or the CLI's `ocr`/`qr` commands. The highlighter can also snap to OCR'd text lines.
+- **Export:** copy to clipboard, Save As (PNG / JPEG / WebP / AVIF), Quick save to a configured folder, or upload to Imgur / imgbb / Google Drive / an S3-compatible bucket / catbox.moe (with local upload history and one-click delete for providers that support it); export size can be scaled to 100/75/50/33%
+- **Pin to screen:** float a region as an always-on-top window -- drag to move, scroll to resize, Esc to close -- for comparing a capture against what's underneath it
 - **Open existing images** for annotation
-- **CLI** — capture, OCR, decode QR, and upload from the terminal; see [docs/CLI.md](docs/CLI.md)
-- **Tray icon + global hotkeys**, all rebindable in Settings > Shortcuts (default: `PrintScreen` region, `Shift+PrintScreen` screen, `Ctrl+PrintScreen` window, `Ctrl+Shift+PrintScreen` translate/extract text; repeat-region, pick-color, and measure are unbound by default)
-- **Settings** persisted across restarts: shortcuts, save folder, output format/quality/scale, theme, translation target language, OCR language, upload provider and credentials
+- **CLI** -- capture, OCR, decode QR, and upload from the terminal; see [docs/CLI.md](docs/CLI.md)
+- **Tray icon + global hotkeys**, all rebindable in Settings > Shortcuts (default: `PrintScreen` region, `Shift+PrintScreen` screen, `Ctrl+PrintScreen` window, `Ctrl+Shift+PrintScreen` translate/extract text; repeat-region, region-to-file, pick-color, and measure are unbound by default)
+- **Auto-updates** on Windows, macOS and the AppImage (the `.deb`/`.rpm`/AUR packages are updated by your package manager); see [Building](docs/BUILDING.md)
+- **Settings** persisted across restarts: shortcuts, save folder, output format/quality/scale, post-capture behavior, theme, translation target language, OCR language, upload provider and credentials, update checks
 
 ## Documentation
 
@@ -39,6 +45,8 @@ sudo dnf install -y librsvg2-devel pipewire-devel clang-devel mesa-libgbm-devel
 Building the **AppImage** bundle also needs `patchelf` (`sudo dnf install patchelf`) — see [Building](docs/BUILDING.md) for that and a couple of other AppImage-specific build quirks.
 
 Other platforms need their standard [Tauri prerequisites](https://tauri.app/start/prerequisites/).
+
+**Emoji stamps (optional):** the editor's emoji stamp tool draws through the system emoji font. The `.deb`/`.rpm` bundles recommend one (`fonts-noto-color-emoji` / `google-noto-emoji-color-fonts`); without it -- notably in the self-contained **AppImage** -- stamps still work but render as monochrome glyphs.
 
 **OCR (used by extract-text/translate/the `ocr` CLI command):**
 

@@ -120,6 +120,8 @@ pub fn selection_cancel(
 ) {
     *state.0.lock().unwrap() = Inner::default();
     *app.state::<crate::cli::CliSink>().0.lock().unwrap() = None;
+    *app.state::<crate::commands::QuicksaveSink>().0.lock().unwrap() = false;
+    *app.state::<crate::commands::PostCaptureOverride>().0.lock().unwrap() = None;
     crate::overlay::close_overlays(&app);
     if *main_was_visible.0.lock().unwrap() {
         let _ = crate::commands::show_main_window(app);
@@ -163,16 +165,32 @@ pub async fn selection_confirm_rect(
     crate::overlay::close_overlays(&app);
 
     let sink = app.state::<crate::cli::CliSink>().0.lock().unwrap().take();
-    match sink {
-        Some(output) => {
-            let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
-            crate::cli::export_to_sink(&app, composited, &output, &settings)
-        }
-        None => {
-            let image_id = images.insert(composited);
-            crate::editor::show(&app, &image_id).await
-        }
+    if let Some(output) = sink {
+        let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+        return crate::cli::export_to_sink(&app, composited, &output, &settings);
     }
+
+    let quicksave = std::mem::take(
+        &mut *app
+            .state::<crate::commands::QuicksaveSink>()
+            .0
+            .lock()
+            .unwrap(),
+    );
+    if quicksave {
+        let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+        let path = crate::export::quicksave_file(&settings);
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir).map_err(|e| CommandError::Image(e.to_string()))?;
+        }
+        let png = crate::images::encode_png(&composited);
+        std::fs::write(&path, &png).map_err(|e| CommandError::Image(e.to_string()))?;
+        crate::export::notify_saved(&app, &path.to_string_lossy());
+        return Ok(());
+    }
+
+    let image_id = images.insert(composited);
+    crate::commands::deliver_capture(&app, image_id, rect).await
 }
 
 /// Confirms the current selection as a pin instead of an editor capture:

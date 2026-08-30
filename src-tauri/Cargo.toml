@@ -38,7 +38,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["time"] }
 xcap = "0.9"
-image = "0.25"
+image = { version = "0.25", features = ["webp", "avif"] }
 arboard = { version = "3", features = ["wayland-data-control"] }
 uuid = { version = "1", features = ["v4"] }
 thiserror = "2"
@@ -52,6 +52,9 @@ whatlang = "0.18"
 # rustls rather than the default native-tls build: keeps S3 uploads off
 # openssl-sys, which needs system dev packages this project otherwise doesn't.
 rust-s3 = { version = "0.35", default-features = false, features = ["sync-rustls-tls"] }
+rustface = "0.1.7"
+tauri-plugin-updater = "2.10.1"
+tauri-plugin-process = "2.3.1"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"

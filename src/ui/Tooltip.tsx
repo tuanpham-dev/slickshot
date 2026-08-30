@@ -7,15 +7,19 @@ interface TooltipProps {
   shortcut?: string;
   children: ReactNode;
   side?: "top" | "bottom" | "left" | "right";
+  /** Forces the tooltip closed. For triggers that open something of their
+   * own (a menu, a popover), where the tooltip would otherwise sit on top
+   * of the thing the click just opened. */
+  suppressed?: boolean;
 }
 
 export function TooltipProvider({ children }: { children: ReactNode }) {
   return <RadixTooltip.Provider delayDuration={400}>{children}</RadixTooltip.Provider>;
 }
 
-export function Tooltip({ label, shortcut, children, side = "top" }: TooltipProps) {
+export function Tooltip({ label, shortcut, children, side = "top", suppressed }: TooltipProps) {
   return (
-    <RadixTooltip.Root>
+    <RadixTooltip.Root open={suppressed ? false : undefined}>
       <RadixTooltip.Trigger asChild>{children}</RadixTooltip.Trigger>
       <RadixTooltip.Portal>
         <RadixTooltip.Content

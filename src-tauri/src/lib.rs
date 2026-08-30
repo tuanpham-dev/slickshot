@@ -1,8 +1,10 @@
 pub mod cli;
 mod capture;
 mod commands;
+mod drive;
 mod editor;
 mod export;
+mod face;
 mod geometry;
 mod hotkeys;
 mod images;
@@ -15,22 +17,33 @@ mod selection;
 mod session;
 mod settings;
 mod theme;
+mod thumbnail;
 mod tray;
+mod update;
 mod translate;
 mod upload;
 
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use clap::Parser;
 use tauri::Manager;
 
-use commands::{Capturer, MainWasVisible};
+use commands::{Capturer, MainWasVisible, PostCaptureOverride, QuicksaveSink};
 use editor::EditorImage;
 use export::PendingExport;
 use images::ImageStore;
 use overlay::{OverlayFocus, OverlayImages};
 use selection::SelectionState;
 use session::CaptureSession;
+
+/// Process-wide handle, for the few paths that need app state but are called
+/// from a signature that can't carry one -- notably the upload providers,
+/// which are plain functions dispatched from `upload_core`.
+static APP_HANDLE: OnceLock<tauri::AppHandle> = OnceLock::new();
+
+pub(crate) fn app_handle() -> Option<tauri::AppHandle> {
+    APP_HANDLE.get().cloned()
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run(cli_command: Option<cli::CliCommand>) {
@@ -53,6 +66,8 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(Capturer(capture::default_capturer()))
         .manage(Mutex::new(None::<CaptureSession>))
         .manage(ImageStore::default())
@@ -64,6 +79,10 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .manage(PendingExport::default())
         .manage(pin::PinWindows::default())
         .manage(cli::CliSink::default())
+        .manage(QuicksaveSink::default())
+        .manage(PostCaptureOverride::default())
+        .manage(thumbnail::ThumbnailImage::default())
+        .manage(update::PendingUpdate::default())
         .manage(ready::MountedWindows::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_monitors,
@@ -76,6 +95,9 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             commands::open_editor,
             commands::show_main_window,
             commands::cursor_physical_position,
+            thumbnail::thumbnail_ready,
+            thumbnail::thumbnail_close,
+            thumbnail::thumbnail_action,
             editor::editor_hide,
             editor::editor_ready,
             overlay::overlay_ready,
@@ -94,6 +116,13 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             settings::set_settings,
             settings::reset_settings,
             ocr::ocr_extract,
+            ocr::ocr_boxes,
+            drive::gdrive_sign_in,
+            drive::gdrive_sign_out,
+            drive::gdrive_account,
+            update::check_update,
+            update::install_update,
+            face::detect_faces,
             ocr::ocr_engine_status,
             ocr::ocr_list_langs,
             ocr::ocr_download_lang,
@@ -115,7 +144,9 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             theme::sync();
 
             let handle = app.handle().clone();
+            let _ = APP_HANDLE.set(handle.clone());
             tray::setup(&handle)?;
+            update::check_in_background(&handle);
             settings::init_hotkeys(&handle).map_err(|e| e.to_string())?;
             if let Err(e) = overlay::prewarm(&handle) {
                 eprintln!("[startup] failed to pre-warm overlay windows: {e}");

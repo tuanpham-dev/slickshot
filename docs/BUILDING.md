@@ -58,3 +58,57 @@ then stop the running daemon once (`systemctl --user stop appimagelauncherd`) so
 ### Missing `patchelf`
 
 `linuxdeploy` also needs the system `patchelf` binary (used to fix shared-library RPATHs when bundling). If it's missing you'll see the same generic `subprocess failed` error even before the icon/appimagetool issues above. Install it: `sudo dnf install patchelf` (Fedora) or your distro's equivalent.
+
+## Auto-updates: signing keys and release setup
+
+Windows, macOS and the **AppImage** update themselves through
+[`tauri-plugin-updater`](https://v2.tauri.app/plugin/updater/), polling the
+`latest.json` attached to the newest GitHub release. The `.deb`, `.rpm` and
+AUR packages deliberately do **not** self-update -- they belong to the user's
+package manager, and the app says so in Settings > Updates instead of offering
+a download.
+
+### One-time setup
+
+The updater only trusts artifacts signed with the private half of the keypair
+whose public half is in `src-tauri/tauri.conf.json` (`plugins.updater.pubkey`).
+That public key is already committed:
+
+```
+dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDlERkMwMzhDMzU4MjQxOQpSV1FaSkZqRE9NRGZDU1o0NnIxZmpmUVA2SHN2WksyS1JaL1ZaSkE2SXZWT0d6Tk5UT3AwNDdQWgo=
+```
+
+The matching **private key was generated outside the repository and is not
+committed**. Before the first signed release, add it to the repo's GitHub
+Actions secrets:
+
+- `TAURI_SIGNING_PRIVATE_KEY` -- the contents of the private key file
+- `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` -- its password, or an empty secret if
+  the key has none
+
+To generate a fresh keypair (only needed if the private key is lost -- note
+that **already-installed copies will stop accepting updates**, since they
+verify against the old public key baked into their build):
+
+```
+pnpm tauri signer generate -w ~/.slickshot-updater.key
+```
+
+Then paste the printed public key into `plugins.updater.pubkey` and update the
+two Actions secrets.
+
+### Cutting a release
+
+Push a `v*.*.*` tag. The `build` workflow builds every platform, signs the
+updater artifacts, and opens a **draft** release with `latest.json` attached.
+Publishing that draft is what makes installed copies see the update, so the
+release notes can be edited first.
+
+### Verifying the update flow locally
+
+1. Build and install the current version.
+2. Bump `version` in `src-tauri/tauri.conf.json`, rebuild, and sign the
+   artifacts with the same key.
+3. Serve a `latest.json` pointing at those artifacts (`python3 -m http.server`
+   is enough) and temporarily point `plugins.updater.endpoints` at it.
+4. Launch the installed copy and use Settings > Updates > Check for updates.

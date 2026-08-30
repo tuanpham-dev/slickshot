@@ -25,7 +25,24 @@ pub enum CaptureMode {
     Color,
     /// Measure a distance on the frozen frame.
     Measure,
+    /// Region select that writes straight to the save folder, skipping the
+    /// editor entirely.
+    #[serde(rename = "region_quicksave")]
+    RegionQuicksave,
 }
+
+/// Set while a `RegionQuicksave` capture is in flight, so the shared
+/// selection-confirm path knows to write the region to disk instead of
+/// handing it to the editor. Mirrors how `CliSink` diverts the same path
+/// for headless captures; cleared on confirm and on cancel.
+#[derive(Default)]
+pub struct QuicksaveSink(pub Mutex<bool>);
+
+/// A one-shot override of `settings.post_capture`, set by the CLI's
+/// `--post-capture`/`--edit` flags. Taken (not read) by `deliver_capture`, so
+/// it applies to exactly the capture it was requested for.
+#[derive(Default)]
+pub struct PostCaptureOverride(pub Mutex<Option<crate::settings::PostCaptureAction>>);
 
 /// Whether the main window was visible right before the most recent capture
 /// hid it. `selection::selection_cancel` re-shows the main window only when
@@ -62,6 +79,48 @@ pub fn list_windows(capturer: State<Capturer>) -> CommandResult<Vec<WindowInfo>>
         .0
         .windows()
         .map_err(|e| CommandError::Capture(e.to_string()))
+}
+
+/// The single place a finished capture is handed off, so `copy_on_capture`
+/// and `post_capture` apply identically no matter which mode produced the
+/// image. `rect` is the captured region in virtual-screen coordinates, used
+/// to place the thumbnail on the monitor the capture came from.
+///
+/// Explicit "open this in the editor" entry points (`open_image_file`,
+/// `open_editor`) deliberately bypass this -- there the editor *is* the
+/// request, not a post-capture preference.
+pub async fn deliver_capture(
+    app: &AppHandle,
+    image_id: String,
+    rect: crate::geometry::PhysRect,
+) -> CommandResult<()> {
+    let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+    let action = app
+        .state::<PostCaptureOverride>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or(settings.post_capture);
+
+    if settings.copy_on_capture {
+        if let Some(img) = app.state::<ImageStore>().get(&image_id) {
+            crate::export::copy_image_to_clipboard(img.as_ref().clone())?;
+        }
+    }
+
+    match action {
+        crate::settings::PostCaptureAction::Editor => crate::editor::show(app, &image_id).await,
+        crate::settings::PostCaptureAction::Thumbnail => {
+            crate::thumbnail::show(app, &image_id, rect).await
+        }
+        crate::settings::PostCaptureAction::None => {
+            // Nothing will render these pixels, so don't hold them: the
+            // clipboard copy above (if any) already owns its own buffer.
+            app.state::<ImageStore>().remove(&image_id);
+            Ok(())
+        }
+    }
 }
 
 async fn hide_and_wait(app: &AppHandle, delay_ms: u32) -> CommandResult<()> {
@@ -135,7 +194,7 @@ pub async fn run_capture(
             let composited = grabbed.composite(rect);
             let image_id = images.insert(composited);
             *session.lock().unwrap() = None;
-            crate::editor::show(&app, &image_id).await?;
+            deliver_capture(&app, image_id, rect).await?;
         }
         CaptureMode::Monitor => {
             let id = target_id.ok_or_else(|| {
@@ -146,9 +205,10 @@ pub async fn run_capture(
             let frame = grabbed
                 .frame_for_monitor(id)
                 .ok_or_else(|| CommandError::Capture(format!("no monitor with id {id}")))?;
+            let rect = frame.monitor.rect;
             let image_id = images.insert_arc(frame.image.clone());
             *session.lock().unwrap() = None;
-            crate::editor::show(&app, &image_id).await?;
+            deliver_capture(&app, image_id, rect).await?;
         }
         CaptureMode::RegionRepeat => {
             let grabbed = CaptureSession::grab(capturer.0.as_ref())
@@ -164,7 +224,7 @@ pub async fn run_capture(
                     let composited = grabbed.composite(rect);
                     let image_id = images.insert(composited);
                     *session.lock().unwrap() = None;
-                    crate::editor::show(&app, &image_id).await?;
+                    deliver_capture(&app, image_id, rect).await?;
                 }
                 None => {
                     *session.lock().unwrap() = Some(grabbed);
@@ -176,6 +236,7 @@ pub async fn run_capture(
             }
         }
         CaptureMode::Region
+        | CaptureMode::RegionQuicksave
         | CaptureMode::Window
         | CaptureMode::Translate
         | CaptureMode::Color
@@ -183,7 +244,16 @@ pub async fn run_capture(
             let grabbed = CaptureSession::grab(capturer.0.as_ref())
                 .map_err(|e| CommandError::Capture(e.to_string()))?;
             *session.lock().unwrap() = Some(grabbed);
-            crate::overlay::open_overlays(&app, mode)
+            *app.state::<QuicksaveSink>().0.lock().unwrap() =
+                mode == CaptureMode::RegionQuicksave;
+            // Quicksave is an ordinary region selection as far as the overlay
+            // is concerned -- only what happens on confirm differs.
+            let overlay_mode = if mode == CaptureMode::RegionQuicksave {
+                CaptureMode::Region
+            } else {
+                mode
+            };
+            crate::overlay::open_overlays(&app, overlay_mode)
                 .await
                 .map_err(|e| CommandError::Window(e.to_string()))?;
         }
@@ -192,6 +262,7 @@ pub async fn run_capture(
     if !matches!(
         mode,
         CaptureMode::Region
+            | CaptureMode::RegionQuicksave
             | CaptureMode::Window
             | CaptureMode::Translate
             | CaptureMode::Color

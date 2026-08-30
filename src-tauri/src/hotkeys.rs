@@ -57,6 +57,10 @@ pub fn default_bindings() -> Vec<HotkeyBinding> {
             accelerator: String::new(),
             mode: CaptureMode::Measure,
         },
+        HotkeyBinding {
+            accelerator: String::new(),
+            mode: CaptureMode::RegionQuicksave,
+        },
     ]
 }
 

@@ -9,14 +9,16 @@ interface IconButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: ButtonVariant;
   size?: ButtonSize;
   active?: boolean;
+  /** Hides the tooltip -- see `Tooltip`'s `suppressed`. */
+  tooltipSuppressed?: boolean;
 }
 
 export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(function IconButton(
-  { label, shortcut, icon, variant = "ghost", size = "md", active, className = "", ...rest },
+  { label, shortcut, icon, variant = "ghost", size = "md", active, tooltipSuppressed, className = "", ...rest },
   ref,
 ) {
   return (
-    <Tooltip label={label} shortcut={shortcut}>
+    <Tooltip label={label} shortcut={shortcut} suppressed={tooltipSuppressed}>
       <Button
         ref={ref}
         iconOnly
