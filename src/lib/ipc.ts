@@ -91,6 +91,15 @@ export function onSelectionChanged(
   return listen<SelectionChangedEvent>("selection:changed", (e) => cb(e.payload));
 }
 
+/** Publishes the overlay's committed annotations, as JSON, to every overlay
+ * window. There is one window per monitor, so a selection spanning two would
+ * otherwise show shapes only on the one they were drawn on. */
+export const overlaySetShapes = (json: string) => call<void>("overlay_set_shapes", { json });
+
+export function onOverlayShapes(cb: (json: string) => void): Promise<UnlistenFn> {
+  return listen<string>("overlay:shapes", (e) => cb(e.payload));
+}
+
 export function onHotkeyError(cb: (message: string) => void): Promise<UnlistenFn> {
   return listen<string>("hotkeys:error", (e) => cb(e.payload));
 }
@@ -153,6 +162,8 @@ export interface AppSettings {
   s3_key_prefix: string;
   s3_public_base: string;
   auto_check_updates: boolean;
+  /** Tool ids the capture overlay's quick-tools bar offers, in bar order. */
+  overlay_tools: string[];
 }
 
 export const getSettings = () => call<AppSettings>("get_settings");
@@ -409,6 +420,39 @@ export async function pinEditorImage(pngBytes: Uint8Array): Promise<void> {
     throw new IpcError(err);
   }
 }
+
+/** Where the next confirm sends the capture. "default" runs the configured
+ * post-capture action; the other two are complete destinations. */
+export type ConfirmDest = "default" | "copy" | "save";
+
+/** One-shot, consumed by the next confirm. Set immediately before it. */
+export const selectionSetDest = (dest: ConfirmDest) =>
+  call<void>("selection_set_dest", { dest });
+
+/** Composites the current selection and returns its image id, leaving the
+ * capture session alive. The overlay flattens annotations over these pixels;
+ * release the id when done. */
+export const selectionRegionImage = () => call<string>("selection_region_image");
+
+/** Confirms a capture the overlay has already flattened (region plus its
+ * annotations). Rust reads the rect from its own selection state, so only the
+ * PNG bytes travel. */
+export async function selectionConfirmAnnotated(pngBytes: Uint8Array): Promise<void> {
+  try {
+    await invoke<void>("selection_confirm_annotated", pngBytes);
+  } catch (err) {
+    throw new IpcError(err);
+  }
+}
+
+/** Opens the editor on the clean region, handing the overlay's annotations
+ * over as editable shapes. */
+export const selectionConfirmToEditor = (shapesJson: string) =>
+  call<void>("selection_confirm_to_editor", { shapesJson });
+
+/** Drains the shapes an overlay parked for this editor session; "" when the
+ * capture arrived without annotations. */
+export const takePendingShapes = () => call<string>("take_pending_shapes");
 
 export function parseHashRoute(): { route: string; params: URLSearchParams } {
   const hash = window.location.hash.replace(/^#/, "");

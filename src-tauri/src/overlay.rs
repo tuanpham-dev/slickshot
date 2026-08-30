@@ -32,6 +32,11 @@ struct OverlayFrame {
     /// Region/Window/Translate -- drives interaction mode in the overlay
     /// webview (drag-to-select vs. click-a-window vs. drag-then-translate).
     mode: CaptureMode,
+    /// The previous capture's region, when it still fits the current screen,
+    /// so a region capture opens with it already selected. `None` on a first
+    /// run, after a monitor rearrangement that leaves it off-screen, or for
+    /// any mode where a pre-selection would be meaningless.
+    seed_rect: Option<PhysRect>,
 }
 
 /// Creates one hidden, already-loaded overlay window per monitor at startup.
@@ -118,11 +123,21 @@ pub async fn open_overlays(app: &AppHandle, mode: CaptureMode) -> Result<(), Str
     // Scoped so the `MutexGuard` (never `Send`) is unambiguously dropped
     // before the `.await` below -- required for this function's future to
     // itself be `Send`, which `tauri::async_runtime::spawn` demands.
-    let (cursor, inserted_ids, labels) = {
+    let (cursor, inserted_ids, labels, seed_rect) = {
         let session_guard = session_state.lock().unwrap();
         let session = session_guard.as_ref().ok_or("no active capture session")?;
 
         let cursor = find_cursor_monitor(app, session);
+
+        // Same rect `RegionRepeat` re-shoots: the stored region clipped to
+        // what is actually on screen now, so an unplugged or rearranged
+        // monitor can't leave the overlay pre-selecting empty space.
+        let seed_rect = if mode == CaptureMode::Region {
+            crate::selection::load_last_region(app)
+                .and_then(|rect| rect.intersect(&session.virtual_rect))
+        } else {
+            None
+        };
 
         let mut inserted_ids = Vec::new();
         let mut labels = Vec::new();
@@ -134,7 +149,7 @@ pub async fn open_overlays(app: &AppHandle, mode: CaptureMode) -> Result<(), Str
             ensure_window(app, frame.monitor.id, frame.monitor.rect)?;
             labels.push((overlay_label(frame.monitor.id), image_id));
         }
-        (cursor, inserted_ids, labels)
+        (cursor, inserted_ids, labels, seed_rect)
     };
 
     // A prewarmed overlay window's page loads asynchronously; emitting the
@@ -148,9 +163,21 @@ pub async fn open_overlays(app: &AppHandle, mode: CaptureMode) -> Result<(), Str
         crate::ready::wait_for_mount(app, label, std::time::Duration::from_secs(3)).await;
     }
     for (label, image_id) in labels {
-        app.emit_to(&label, "overlay:frame", OverlayFrame { image_id, mode })
+        app.emit_to(
+            &label,
+            "overlay:frame",
+            OverlayFrame {
+                image_id,
+                mode,
+                seed_rect,
+            },
+        )
             .map_err(|e| e.to_string())?;
     }
+
+    // Each capture starts with a clean sheet; the frontends clear their own
+    // copies when the frame arrives.
+    app.state::<crate::commands::OverlayShapes>().0.lock().unwrap().clear();
 
     *overlay_images.0.lock().unwrap() = inserted_ids;
     *app.state::<OverlayFocus>().0.lock().unwrap() = Some(cursor);

@@ -35,6 +35,31 @@ pub fn load_last_region(app: &AppHandle) -> Option<PhysRect> {
 #[derive(Default)]
 pub struct SelectionState(Mutex<Inner>);
 
+/// Where a confirmed capture goes. The overlay's action cluster offers Copy
+/// and Save alongside the plain confirm, which keeps meaning "whatever
+/// `post_capture` is configured to do".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ConfirmDest {
+    #[default]
+    Default,
+    Copy,
+    Save,
+}
+
+/// A one-shot destination for the next confirm, set by the overlay just
+/// before it confirms. Carried as state rather than an argument because the
+/// annotated path's request body is raw PNG bytes and cannot also hold JSON;
+/// one mechanism serving both paths beats two that can drift. Taken (not
+/// read) on use, and cleared on cancel and on every new capture.
+#[derive(Default)]
+pub struct ConfirmDestOverride(pub Mutex<Option<ConfirmDest>>);
+
+#[tauri::command]
+pub fn selection_set_dest(state: State<ConfirmDestOverride>, dest: ConfirmDest) {
+    *state.0.lock().unwrap() = Some(dest);
+}
+
 #[derive(Default)]
 struct Inner {
     anchor: Option<PhysPoint>,
@@ -123,6 +148,8 @@ pub fn selection_cancel(
     *app.state::<crate::commands::QuicksaveSink>().0.lock().unwrap() = false;
     *app.state::<crate::commands::PostCaptureOverride>().0.lock().unwrap() = None;
     *app.state::<crate::commands::AutoSaveOverride>().0.lock().unwrap() = None;
+    app.state::<crate::commands::OverlayShapes>().0.lock().unwrap().clear();
+    *app.state::<ConfirmDestOverride>().0.lock().unwrap() = None;
     crate::overlay::close_overlays(&app);
     if *main_was_visible.0.lock().unwrap() {
         let _ = crate::commands::show_main_window(app);
@@ -146,6 +173,124 @@ pub async fn selection_confirm(
     selection_confirm_rect(app, session, images, rect).await
 }
 
+/// Composites the current selection into the image store and returns its id,
+/// leaving the capture session intact.
+///
+/// The overlay needs these exact pixels to flatten annotations over, and
+/// cannot produce them itself: a selection can span monitors while each
+/// overlay window holds only its own monitor's frozen frame. The caller is
+/// expected to `release_image` the id once it has drawn from it.
+#[tauri::command]
+pub fn selection_region_image(
+    state: State<SelectionState>,
+    session: State<Mutex<Option<CaptureSession>>>,
+    images: State<ImageStore>,
+) -> CommandResult<String> {
+    let rect = {
+        let inner = state.0.lock().unwrap();
+        current_rect(&inner)
+    };
+    let Some(rect) = rect else {
+        return Err(CommandError::Capture("no selection".into()));
+    };
+    let guard = session.lock().unwrap();
+    let session = guard.as_ref().ok_or(CommandError::NoSession)?;
+    Ok(images.insert(session.composite(rect)))
+}
+
+/// Confirms a capture the overlay has already flattened: the region plus its
+/// annotations, encoded as PNG in the raw request body. Everything after the
+/// pixels exist is shared with the un-annotated path, so post-capture routing,
+/// quicksave and the CLI sink behave identically.
+///
+/// The rect comes from `SelectionState` rather than the request: Tauri's raw
+/// body carries bytes only, and the state already holds the authoritative
+/// selection. The bytes are checked against it, so a mismatch fails loudly
+/// instead of writing a capture that does not match the region confirmed.
+#[tauri::command]
+pub async fn selection_confirm_annotated(
+    app: AppHandle,
+    state: State<'_, SelectionState>,
+    session: State<'_, Mutex<Option<CaptureSession>>>,
+    images: State<'_, ImageStore>,
+    request: tauri::ipc::Request<'_>,
+) -> CommandResult<()> {
+    let rect = {
+        let inner = state.0.lock().unwrap();
+        current_rect(&inner)
+    };
+    let Some(rect) = rect else {
+        return Err(CommandError::Capture("no selection to confirm".into()));
+    };
+    let flattened = decode_png_body(&request)?;
+    if flattened.dimensions() != (rect.w, rect.h) {
+        return Err(CommandError::Image(format!(
+            "annotated capture is {}x{} but the selection is {}x{}",
+            flattened.width(),
+            flattened.height(),
+            rect.w,
+            rect.h
+        )));
+    }
+    finish_confirm(app, session, images, rect, flattened).await
+}
+
+/// Opens the editor on the *clean* region, parking the overlay's annotations
+/// for it to pick up -- so they arrive as editable shapes rather than baked
+/// pixels. Bypasses `deliver_capture`: "Edit" means the editor whatever the
+/// configured post-capture action is.
+#[tauri::command]
+pub async fn selection_confirm_to_editor(
+    app: AppHandle,
+    state: State<'_, SelectionState>,
+    session: State<'_, Mutex<Option<CaptureSession>>>,
+    images: State<'_, ImageStore>,
+    shapes_json: String,
+) -> CommandResult<()> {
+    let rect = {
+        let inner = state.0.lock().unwrap();
+        current_rect(&inner)
+    };
+    let Some(rect) = rect else {
+        return Err(CommandError::Capture("no selection to confirm".into()));
+    };
+    let composited = {
+        let guard = session.lock().unwrap();
+        let session = guard.as_ref().ok_or(CommandError::NoSession)?;
+        session.composite(rect)
+    };
+    *session.lock().unwrap() = None;
+    *app.state::<SelectionState>().0.lock().unwrap() = Inner::default();
+    save_last_region(&app, rect);
+    crate::overlay::close_overlays(&app);
+
+    // Stored before the editor is told about the image: it drains this right
+    // after the image loads, and an empty string means "no annotations".
+    *app.state::<crate::editor::PendingEditorShapes>()
+        .0
+        .lock()
+        .unwrap() = shapes_json;
+
+    let image_id = images.insert(composited);
+    crate::editor::show(&app, &image_id).await
+}
+
+fn decode_png_body(request: &tauri::ipc::Request<'_>) -> CommandResult<image::RgbaImage> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes,
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err(CommandError::Image(
+                "selection_confirm_annotated expects a raw binary body, not JSON".into(),
+            ))
+        }
+    };
+    Ok(
+        image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .map_err(|e| CommandError::Image(e.to_string()))?
+            .to_rgba8(),
+    )
+}
+
 /// Confirms an explicit rect (used by window-pick mode, which selects a
 /// window's rect on click rather than dragging).
 pub async fn selection_confirm_rect(
@@ -159,6 +304,21 @@ pub async fn selection_confirm_rect(
         let session = guard.as_ref().ok_or(CommandError::NoSession)?;
         session.composite(rect)
     };
+    finish_confirm(app, session, images, rect, composited).await
+}
+
+/// Everything a confirmed region goes through once its pixels exist: tear
+/// down the session, remember the rect, close the overlays, then route the
+/// image (CLI sink -> quicksave -> `deliver_capture`). Split out so an
+/// annotated capture, whose pixels are flattened in the webview rather than
+/// composited here, takes the identical path.
+async fn finish_confirm(
+    app: AppHandle,
+    session: State<'_, Mutex<Option<CaptureSession>>>,
+    images: State<'_, ImageStore>,
+    rect: PhysRect,
+    composited: image::RgbaImage,
+) -> CommandResult<()> {
     *session.lock().unwrap() = None;
     *app.state::<SelectionState>().0.lock().unwrap() = Inner::default();
     save_last_region(&app, rect);
@@ -190,8 +350,25 @@ pub async fn selection_confirm_rect(
         return Ok(());
     }
 
-    let image_id = images.insert(composited);
-    crate::commands::deliver_capture(&app, image_id, rect).await
+    let dest = app
+        .state::<ConfirmDestOverride>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or_default();
+    match dest {
+        // Copy and Save are complete destinations: neither runs the
+        // configured post-capture action on top of what was asked for.
+        ConfirmDest::Copy => crate::export::copy_image_to_clipboard(composited),
+        // Same writer, notification included, that keeps a capture nobody
+        // opened -- Save is just that on purpose rather than as a fallback.
+        ConfirmDest::Save => crate::export::autosave_image(&app, &composited).map(|_| ()),
+        ConfirmDest::Default => {
+            let image_id = images.insert(composited);
+            crate::commands::deliver_capture(&app, image_id, rect).await
+        }
+    }
 }
 
 /// Confirms the current selection as a pin instead of an editor capture:

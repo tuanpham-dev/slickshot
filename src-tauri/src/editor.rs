@@ -13,6 +13,21 @@ const LABEL: &str = "editor";
 #[derive(Default)]
 pub struct EditorImage(pub Mutex<Option<String>>);
 
+/// Annotations drawn on the capture overlay, waiting for the editor to pick
+/// them up as editable shapes. Held here rather than widened onto the
+/// `editor:image` payload because the editor is also seeded from a URL hash
+/// param on a cold start, which could not carry them; draining a state covers
+/// both entry points identically. Empty means "nothing pending".
+#[derive(Default)]
+pub struct PendingEditorShapes(pub Mutex<String>);
+
+/// Returns the pending annotations (as the JSON the overlay serialized) and
+/// clears them, so a later capture cannot inherit an earlier one's shapes.
+#[tauri::command]
+pub fn take_pending_shapes(state: State<PendingEditorShapes>) -> String {
+    std::mem::take(&mut *state.0.lock().unwrap())
+}
+
 /// Creates the hidden, already-loaded editor window at startup. Reusing it
 /// per capture (emit a fresh image id + show) instead of building a brand
 /// new `WebviewWindow` avoids reloading the whole JS bundle every time --

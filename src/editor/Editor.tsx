@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
 import { revealItemInDir, openUrl } from "@tauri-apps/plugin-opener";
 import { getCurrentWindow } from "@tauri-apps/api/window";
@@ -16,6 +16,7 @@ import {
 } from "lucide-react";
 import {
   fetchShotImage,
+  takePendingShapes,
   editorHide,
   editorReady,
   frontendMounted,
@@ -61,7 +62,7 @@ import { OcrMissingDialog } from "../ui/OcrMissingDialog";
 import { DropdownMenu } from "radix-ui";
 import { moveShape } from "./tools/select";
 import { createImageShape } from "./tools/image";
-import type { ImgPoint, ToolId } from "./types";
+import type { ImgPoint, Shape, ToolId } from "./types";
 import { COLOR_FORMATS, formatColor, measurementLabel, type Rgb } from "../lib/color";
 import { PixelLoupe, SAMPLE_PX } from "../ui/PixelLoupe";
 import type { PhysRect } from "../lib/geometry";
@@ -135,6 +136,20 @@ const SHORTCUT_TOOLS: Record<string, ToolId> = {
   g: "stamp",
   z: "loupe",
 };
+
+/** Parses the shapes an overlay parked for this session. Malformed JSON
+ * loses the annotations rather than the capture -- the image is the thing
+ * worth keeping. */
+function parsePendingShapes(json: string): Shape[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json);
+    return Array.isArray(parsed) ? (parsed as Shape[]) : [];
+  } catch (err) {
+    console.error("pending editor shapes were not valid JSON", err);
+    return [];
+  }
+}
 
 export function Editor({ params }: EditorProps) {
   // The window is pre-warmed and reused across captures (see `editor::show`
@@ -248,14 +263,31 @@ export function Editor({ params }: EditorProps) {
     setTool(next);
   }
 
+  // `take_pending_shapes` is one-shot: it clears the state as it reads it. The
+  // effect below can run more than once for the same image -- StrictMode
+  // double-invokes it on mount, and the cold-start path mounts with the image
+  // already set from the URL -- and a second, unguarded drain would come back
+  // empty and wipe the annotations the first one fetched. Caching the promise
+  // per image id means every invocation awaits the same single drain.
+  const drainRef = useRef<{ id: string; shapes: Promise<string> } | null>(null);
+  const pendingShapesOnce = useCallback((id: string): Promise<string> => {
+    if (drainRef.current?.id !== id) {
+      drainRef.current = { id, shapes: takePendingShapes().catch(() => "") };
+    }
+    return drainRef.current.shapes;
+  }, []);
+
   useEffect(() => {
     if (!imageId) return;
     setResultTab("origin");
     let stale = false;
-    fetchShotImage(imageId)
-      .then((bitmap) => {
+    // Drained alongside the image, not after it: `setImage` resets the
+    // canvas, so seeding the shapes in the same call is what keeps them from
+    // being wiped by their own arrival.
+    Promise.all([fetchShotImage(imageId), pendingShapesOnce(imageId)])
+      .then(([bitmap, shapesJson]) => {
         if (stale) return;
-        setImage(imageId, bitmap.width, bitmap.height);
+        setImage(imageId, bitmap.width, bitmap.height, parsePendingShapes(shapesJson));
         setBaseImage(bitmap);
       })
       .catch((err) => {
@@ -267,7 +299,7 @@ export function Editor({ params }: EditorProps) {
     return () => {
       stale = true;
     };
-  }, [imageId, setImage]);
+  }, [imageId, setImage, pendingShapesOnce]);
 
   // Signals Rust to show the window. As the parent, this effect runs after
   // Canvas's effects on the same commit -- i.e. after the capture has been

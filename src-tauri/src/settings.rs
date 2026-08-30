@@ -98,6 +98,46 @@ fn default_auto_save() -> bool {
     true
 }
 
+/// The tools the capture overlay offers for quick markup: enough to annotate
+/// without opening the editor, few enough that the bar stays a bar.
+fn default_overlay_tools() -> Vec<String> {
+    ["arrow", "rect", "text", "freehand", "pixelate", "marker"]
+        .into_iter()
+        .map(String::from)
+        .collect()
+}
+
+/// Every tool id the overlay knows how to arm. An id outside this set is
+/// dropped on parse rather than failing the whole `Settings` read, the same
+/// treatment `hotkeys` gets -- a settings file written by a newer build (or
+/// naming a tool since removed) must not stop the app from starting.
+pub const OVERLAY_TOOL_IDS: &[&str] = &[
+    "arrow",
+    "line",
+    "rect",
+    "ellipse",
+    "freehand",
+    "text",
+    "highlight",
+    "pixelate",
+    "spotlight",
+    "marker",
+    "stamp",
+    "loupe",
+];
+
+fn deserialize_overlay_tools<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw: Vec<serde_json::Value> = Deserialize::deserialize(deserializer)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .filter(|id| OVERLAY_TOOL_IDS.contains(&id.as_str()))
+        .collect())
+}
+
 /// Parses `hotkeys` leniently: each array element that fails to deserialize
 /// (most commonly a `mode` value naming a `CaptureMode` variant that has
 /// since been removed, e.g. a retired capture mode) is silently dropped
@@ -198,6 +238,13 @@ pub struct Settings {
     /// Ignored by the deb/rpm/AUR builds, which the package manager owns.
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
+    /// Which annotation tools the region overlay's quick-tools bar offers,
+    /// in bar order.
+    #[serde(
+        default = "default_overlay_tools",
+        deserialize_with = "deserialize_overlay_tools"
+    )]
+    pub overlay_tools: Vec<String>,
 }
 
 impl Default for Settings {
@@ -230,6 +277,7 @@ impl Default for Settings {
             s3_key_prefix: String::new(),
             s3_public_base: String::new(),
             auto_check_updates: default_auto_check_updates(),
+            overlay_tools: default_overlay_tools(),
         }
     }
 }
@@ -349,6 +397,50 @@ mod tests {
         assert!(!settings.translate_target.is_empty());
         assert_eq!(settings.upload_provider, UploadProvider::Catbox);
         assert!(settings.imgur_client_id.is_empty());
+    }
+
+    /// A `settings.json` predating the capture overlay's quick tools must
+    /// come back with the six defaults, not an empty bar.
+    #[test]
+    fn old_settings_json_without_overlay_tools_gets_defaults() {
+        let old_json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": true,
+            "copy_on_capture": false,
+            "theme": "system"
+        });
+
+        let settings: Settings = serde_json::from_value(old_json).expect("must still deserialize");
+        assert_eq!(
+            settings.overlay_tools,
+            vec!["arrow", "rect", "text", "freehand", "pixelate", "marker"],
+        );
+    }
+
+    /// An unrecognized tool id -- a tool since removed, or one from a newer
+    /// build -- is dropped, leaving the rest of the bar (and the rest of the
+    /// settings file) intact.
+    #[test]
+    fn unknown_overlay_tool_id_is_dropped_not_fatal() {
+        let json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": true,
+            "copy_on_capture": false,
+            "theme": "system",
+            "overlay_tools": ["arrow", "teleport", "marker", 7]
+        });
+
+        let settings: Settings = serde_json::from_value(json)
+            .expect("an unknown tool id must not fail the whole parse");
+        assert_eq!(settings.overlay_tools, vec!["arrow", "marker"]);
     }
 
     /// Reproduces a real startup crash: a `settings.json` saved while the

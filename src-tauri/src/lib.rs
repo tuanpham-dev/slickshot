@@ -82,6 +82,9 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .manage(QuicksaveSink::default())
         .manage(PostCaptureOverride::default())
         .manage(AutoSaveOverride::default())
+        .manage(commands::OverlayShapes::default())
+        .manage(editor::PendingEditorShapes::default())
+        .manage(selection::ConfirmDestOverride::default())
         .manage(thumbnail::ThumbnailImage::default())
         .manage(update::PendingUpdate::default())
         .manage(ready::MountedWindows::default())
@@ -96,6 +99,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             commands::open_editor,
             commands::show_main_window,
             commands::cursor_physical_position,
+            commands::overlay_set_shapes,
             thumbnail::thumbnail_ready,
             thumbnail::thumbnail_close,
             thumbnail::thumbnail_action,
@@ -109,6 +113,11 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             selection::selection_cancel,
             selection::selection_confirm,
             selection::selection_confirm_pin,
+            selection::selection_confirm_annotated,
+            selection::selection_set_dest,
+            selection::selection_region_image,
+            selection::selection_confirm_to_editor,
+            editor::take_pending_shapes,
             selection::selection_confirm_window,
             export::export_prepare,
             export::export_commit,

@@ -10,7 +10,6 @@ import {
   Settings as SettingsIcon,
   Languages,
   ScanText,
-  Repeat,
   Pipette,
   Ruler,
   History as HistoryIcon,
@@ -406,14 +405,9 @@ export function MainWindow() {
                 warning={ocrStatus !== null && !ocrStatus.available}
               />
             </div>
-            <ModeTile
-              compact
-              icon={<Repeat size={18} />}
-              label="Repeat region"
-              shortcut={shortcutFor("region_repeat")}
-              onClick={() => trigger("region_repeat")}
-              disabled={busy}
-            />
+            {/* The two point-and-read tools share a row: both are compact,
+                and pairing them keeps the list short enough to see without
+                scrolling. */}
             <ModeTile
               compact
               icon={<Pipette size={18} />}
@@ -422,16 +416,14 @@ export function MainWindow() {
               onClick={() => trigger("color")}
               disabled={busy}
             />
-            <div className="col-span-2">
-              <ModeTile
-                compact
-                icon={<Ruler size={18} />}
-                label="Measure"
-                shortcut={shortcutFor("measure")}
-                onClick={() => trigger("measure")}
-                disabled={busy}
-              />
-            </div>
+            <ModeTile
+              compact
+              icon={<Ruler size={18} />}
+              label="Measure"
+              shortcut={shortcutFor("measure")}
+              onClick={() => trigger("measure")}
+              disabled={busy}
+            />
           </div>
 
           <ModeTile

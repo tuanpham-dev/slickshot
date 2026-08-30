@@ -9,6 +9,7 @@ import { Switch } from "../ui/Switch";
 import { Field, Input } from "../ui/Field";
 import { Button } from "../ui/Button";
 import { ShortcutRecorder } from "../ui/ShortcutRecorder";
+import { OVERLAY_TOOLS } from "../overlay/tools";
 import { ConfirmDialog } from "../ui/Dialog";
 import { useToast } from "../ui/Toast";
 import { storeTheme, type ThemeOverride } from "../lib/theme";
@@ -351,6 +352,42 @@ export function Settings({ onBack }: { onBack: () => void }) {
           {settings.default_format === "webp" && (
             <p className="text-xs text-[var(--fg-muted)]">WebP is written losslessly, so quality settings do not apply.</p>
           )}
+        </section>
+
+        <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
+          <h2 className="text-sm font-semibold text-[var(--fg)]">Capture overlay</h2>
+          <p className="text-xs text-[var(--fg-muted)]">
+            Tools offered on the region overlay, so simple markup never needs the editor.
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            {OVERLAY_TOOLS.map((t) => {
+              const on = settings.overlay_tools.includes(t.id);
+              const Icon = t.icon;
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  aria-pressed={on}
+                  // Toggling writes the canonical order rather than append
+                  // order, so the bar reads the same however it was built up.
+                  onClick={() =>
+                    update({
+                      overlay_tools: OVERLAY_TOOLS.filter((o) =>
+                        o.id === t.id ? !on : settings.overlay_tools.includes(o.id),
+                      ).map((o) => o.id),
+                    })
+                  }
+                  className={`inline-flex items-center gap-1.5 h-8 px-2.5 rounded-full border text-xs font-medium ${
+                    on
+                      ? "bg-[var(--accent)] text-white border-[var(--accent)]"
+                      : "text-[var(--fg)] border-[var(--border)] hover:bg-[var(--surface-hover)]"
+                  }`}
+                >
+                  <Icon size={14} /> {t.label}
+                </button>
+              );
+            })}
+          </div>
         </section>
 
         <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">

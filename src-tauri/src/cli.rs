@@ -41,6 +41,12 @@ pub enum CliCommand {
         #[command(flatten)]
         capture: CaptureArgs,
     },
+    /// Re-shoot the last confirmed region without showing the overlay.
+    /// Needs the app running -- the region is remembered by it.
+    RepeatRegion {
+        #[command(flatten)]
+        capture: CaptureArgs,
+    },
     /// Interactive window pick, or a headless capture-by-title with `--title`.
     Window {
         /// Case-insensitive substring match against window titles. When set,
@@ -81,7 +87,9 @@ impl CliCommand {
             | CliCommand::Upload { .. }
             | CliCommand::ListMonitors => true,
             CliCommand::Window { title, .. } => title.is_some(),
-            CliCommand::Region { .. } | CliCommand::Open { .. } => false,
+            CliCommand::Region { .. }
+            | CliCommand::RepeatRegion { .. }
+            | CliCommand::Open { .. } => false,
         }
     }
 }
@@ -290,7 +298,10 @@ pub fn run_headless(cmd: CliCommand) -> Result<(), String> {
             }
             Ok(())
         }
-        CliCommand::Region { .. } | CliCommand::Window { title: None, .. } | CliCommand::Open { .. } => {
+        CliCommand::Region { .. }
+        | CliCommand::RepeatRegion { .. }
+        | CliCommand::Window { title: None, .. }
+        | CliCommand::Open { .. } => {
             unreachable!("interactive commands are dispatched via lib::run/dispatch, not run_headless")
         }
     }
@@ -437,6 +448,9 @@ pub fn dispatch(app: AppHandle, cmd: CliCommand) {
     match cmd {
         CliCommand::Open { path } => spawn_open(app, path),
         CliCommand::Region { capture } => spawn_capture(app, CaptureMode::Region, capture),
+        // Not headless despite showing no overlay: the region it re-shoots is
+        // remembered by the running app, so it has to be dispatched into it.
+        CliCommand::RepeatRegion { capture } => spawn_capture(app, CaptureMode::RegionRepeat, capture),
         CliCommand::Window { title: None, capture } => spawn_capture(app, CaptureMode::Window, capture),
         CliCommand::Window { title: Some(_), .. } => {
             eprintln!("[cli] window --title is a headless capture and must run before the app starts");

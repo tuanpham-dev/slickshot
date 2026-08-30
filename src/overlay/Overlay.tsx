@@ -5,11 +5,20 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { Check, X, Loader2, Pin as PinIcon } from "lucide-react";
+import { Check, Copy, Download, Loader2, Pencil, Pin as PinIcon, X } from "lucide-react";
 import {
   listMonitors,
   listWindows,
   onSelectionChanged,
+  onOverlayShapes,
+  overlaySetShapes,
+  releaseImage,
+  selectionSetDest,
+  selectionRegionImage,
+  selectionConfirmAnnotated,
+  selectionConfirmToEditor,
+  type ConfirmDest,
+  type AppSettings,
   selectionBegin,
   selectionCancel,
   selectionConfirm,
@@ -56,6 +65,22 @@ import {
   type ColorFormat,
   type Rgb,
 } from "./Loupe";
+import { rebaseToRegion, shapesForMonitor, useAnnotations } from "./annotations";
+import { pointerIntent } from "./pointer";
+import { confirmRoute } from "./confirm";
+import { placeCluster } from "./cluster";
+import { QuickTools, type QuickToolsPopover } from "./QuickTools";
+import { SELECT_TOOL, resolveOverlayTools, type OverlayToolMeta } from "./tools";
+import { applyStyleToShape, styleOfShape, toolForShape } from "./style";
+import { render } from "../editor/render";
+import { flattenToPng } from "../editor/export";
+import { DEFAULT_STYLE, isRotatable, type Shape, type Style, type ToolId } from "../editor/types";
+import { makeDraft } from "../editor/tools/draft";
+import { moveShape, pickShape } from "../editor/tools/select";
+import { extendFreehand, startFreehand } from "../editor/tools/freehand";
+import { createMarker } from "../editor/tools/marker";
+import { createText } from "../editor/tools/text";
+import { createStamp, pushRecentStamp } from "../editor/tools/stamp";
 
 interface OverlayProps {
   params: URLSearchParams;
@@ -64,6 +89,9 @@ interface OverlayProps {
 interface OverlayFrame {
   image_id: string;
   mode: "region" | "window" | "translate" | "color" | "measure";
+  /** Previous capture's region, already clipped to the current screen by
+   * Rust. Present only for region mode, and only when there is one. */
+  seed_rect: PhysRect | null;
 }
 
 /** Cursor position in both spaces: physical for sampling/measuring, CSS for
@@ -131,6 +159,7 @@ export function Overlay({ params }: OverlayProps) {
 
   const containerRef = useRef<HTMLDivElement>(null);
   const frameCanvasRef = useRef<HTMLCanvasElement>(null);
+  const annotationCanvasRef = useRef<HTMLCanvasElement>(null);
   const [monitor, setMonitor] = useState<MonitorInfo | null>(null);
   const [frame, setFrame] = useState<OverlayFrame | null>(null);
   const [selection, setSelection] = useState<PhysRect | null>(null);
@@ -161,6 +190,47 @@ export function Overlay({ params }: OverlayProps) {
   // handler below), not per drag-selected region -- defaults to true so the
   // first region in a session isn't held back by the check still in flight.
   const primaryAvailableRef = useRef(true);
+
+  const annotations = useAnnotations();
+  // Identity-stable, but read through a ref from the `overlay:frame` listener
+  // so that effect keeps its `[monitorId]` dependency list.
+  const annotationsRef = useRef(annotations);
+  annotationsRef.current = annotations;
+  // Bumped when an inserted image finishes decoding, to force one more
+  // annotation pass -- image shapes draw nothing on the render that first
+  // requests them.
+  const [imageTick, setImageTick] = useState(0);
+  /** The armed annotation tool, or null when the overlay is a plain region
+   * picker. Only ever non-null in region mode. */
+  const [activeTool, setActiveTool] = useState<ToolId | null>(null);
+  // Session-local: the overlay never writes back to settings, so a colour
+  // picked mid-capture cannot quietly retune what the editor draws.
+  const [style, setStyle] = useState<Style>(DEFAULT_STYLE);
+  const drawStartRef = useRef<PhysPoint | null>(null);
+  const drawingRef = useRef(false);
+  const [textEdit, setTextEdit] = useState<{ point: PhysPoint; cssX: number; cssY: number } | null>(
+    null,
+  );
+  const [textValue, setTextValue] = useState("");
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  // Read per capture session, like the translate settings above: this window
+  // is pre-warmed and reused, so the setting can change between captures
+  // without it ever remounting.
+  const [overlayTools, setOverlayTools] = useState<OverlayToolMeta[]>([]);
+  /** What Confirm will do with the capture, read per session like the tools
+   * above. Only "editor" changes how annotations travel. */
+  const [postCapture, setPostCapture] = useState<AppSettings["post_capture"]>("editor");
+  /** The annotation under edit. Set when one is drawn or picked, and what
+   * makes the settings dropdown edit *that shape* rather than only the next
+   * one drawn. */
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  /** A shape mid-drag, rendered in place of its committed self. Kept local so
+   * dragging costs one undo step and one broadcast, not one per pointermove. */
+  const [liveEdit, setLiveEdit] = useState<Shape | null>(null);
+  const shapeDragRef = useRef<{ orig: Shape; start: PhysPoint } | null>(null);
+  // Owned here, not inside `QuickTools`, so the Escape handler below can
+  // close a popover before it disarms the tool or cancels the capture.
+  const [openPopover, setOpenPopover] = useState<QuickToolsPopover | null>(null);
 
   const [aspect, setAspect] = useState<AspectId>(loadAspect);
   const [snapGuides, setSnapGuides] = useState<SnapGuide[]>([]);
@@ -235,11 +305,35 @@ export function Overlay({ params }: OverlayProps) {
         setMeasurement(null);
         measuringRef.current = false;
         pressPointRef.current = null;
+        annotationsRef.current.clear();
+        setActiveTool(null);
+        setSelectedId(null);
+        setLiveEdit(null);
+        shapeDragRef.current = null;
+        setOpenPopover(null);
+        setStyle(DEFAULT_STYLE);
+        setTextEdit(null);
+        setTextValue("");
+        drawingRef.current = false;
+        drawStartRef.current = null;
         setFrame(e.payload);
+        // Pre-select the previous region by pushing it through the normal
+        // selection path rather than seeding local state: that is what makes
+        // it immediately editable (handles, move, Enter to confirm) and keeps
+        // every other overlay window in step via `selection:changed`.
+        if (e.payload.seed_rect) selectionSetRect(e.payload.seed_rect);
         // Region mode loads them too: hovering a window there highlights it
         // and a click (rather than a drag) snaps the selection to its bounds.
         if (e.payload.mode === "window" || e.payload.mode === "region") {
           listWindows().then(setWindows);
+        }
+        if (e.payload.mode === "region") {
+          getSettings()
+            .then((s) => {
+              setOverlayTools(resolveOverlayTools(s.overlay_tools));
+              setPostCapture(s.post_capture);
+            })
+            .catch(() => setOverlayTools([]));
         }
         if (e.payload.mode === "translate") {
           getSettings()
@@ -301,6 +395,51 @@ export function Overlay({ params }: OverlayProps) {
     };
   }, [imageId]);
 
+  // Annotations are stored in virtual-screen coordinates (matching the
+  // selection rect) and drawn into a monitor-sized canvas, so every pass
+  // translates by the monitor origin first. Re-runs on any change to the
+  // committed list, the in-progress draft, or the frame beneath it.
+  useEffect(() => {
+    const canvas = annotationCanvasRef.current;
+    if (!canvas || !monitor) return;
+    if (canvas.width !== monitor.rect.w || canvas.height !== monitor.rect.h) {
+      canvas.width = monitor.rect.w;
+      canvas.height = monitor.rect.h;
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    const committed = liveEdit
+      ? annotations.shapes.map((s) => (s.id === liveEdit.id ? liveEdit : s))
+      : annotations.shapes;
+    const all = annotations.draft ? [...committed, annotations.draft] : committed;
+    if (all.length === 0) return;
+    ctx.save();
+    // Clip to the selection: `render()` paints a spotlight's dim across the
+    // whole canvas, which here is an entire monitor rather than the captured
+    // image. Without the clip a spotlight would dim the desktop outside the
+    // region too, on top of the overlay's own mask.
+    if (selection) {
+      ctx.beginPath();
+      ctx.rect(
+        selection.x - monitor.rect.x,
+        selection.y - monitor.rect.y,
+        selection.w,
+        selection.h,
+      );
+      ctx.clip();
+    }
+    render(ctx, shapesForMonitor(all, monitor.rect), {
+      // Monitor-local, matching the translated shapes -- censor and magnifier
+      // sample this, so the two spaces have to agree.
+      baseImage: imgLoaded ? frameCanvasRef.current : null,
+      // Draws the same handles the editor puts on a selected shape.
+      selectedId,
+      onImageLoad: () => setImageTick((t) => t + 1),
+    });
+    ctx.restore();
+  }, [annotations.shapes, annotations.draft, liveEdit, selectedId, monitor, selection, imgLoaded, imageTick]);
+
   // Runs on the commit that first renders the mask/hint UI over the drawn
   // frame -- only now is it safe for Rust to show this window (showing any
   // earlier flashed a blank fullscreen window while the frame loaded).
@@ -308,8 +447,36 @@ export function Overlay({ params }: OverlayProps) {
     if (imgLoaded && imageId) overlayReady(monitorId);
   }, [imgLoaded, imageId, monitorId]);
 
+  // Explicit imperative focus, deferred to a macrotask -- the same treatment
+  // the editor's canvas needs (see `Canvas.tsx`). `autoFocus` cannot do this:
+  // it focuses synchronously during the pointerdown that opened the field,
+  // and the browser's own focus-follows-click settling for that same click
+  // lands afterwards on mouseup and takes focus straight back, so the field
+  // appears but swallows nothing you type.
+  useEffect(() => {
+    if (!textEdit) return;
+    const id = setTimeout(() => textareaRef.current?.focus(), 0);
+    return () => clearTimeout(id);
+  }, [textEdit]);
+
   useEffect(() => {
     const unlisten = onSelectionChanged((e) => setSelection(e.rect));
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, []);
+
+  // Committed shapes are owned by Rust and mirrored here, so a selection
+  // spanning two monitors shows the same annotations on both windows. The
+  // window that drew them receives its own echo, which is a no-op.
+  useEffect(() => {
+    const unlisten = onOverlayShapes((json) => {
+      try {
+        annotationsRef.current.replace(json ? (JSON.parse(json) as Shape[]) : []);
+      } catch (err) {
+        console.error("overlay shapes payload was not valid JSON", err);
+      }
+    });
     return () => {
       unlisten.then((fn) => fn());
     };
@@ -399,6 +566,105 @@ export function Overlay({ params }: OverlayProps) {
     handleCancel();
   }
 
+  const selectedShape = selectedId
+    ? annotations.shapes.find((s) => s.id === selectedId) ?? null
+    : null;
+  /** What the dropdown edits. A selected shape's own values win over the
+   * session style, so opening its settings shows what that shape looks like
+   * rather than what the last-drawn one did. */
+  const editedStyle: Style = selectedShape
+    ? { ...style, ...styleOfShape(selectedShape) }
+    : style;
+  /** Whose options the dropdown lists: the selected shape's, else the armed
+   * tool's. Select on its own has none, which is what hides the chevron. */
+  const optionsFor: ToolId | null = selectedShape
+    ? toolForShape(selectedShape)
+    : activeTool === "select"
+      ? null
+      : activeTool;
+
+  /** Style edits go to the session (so the next shape inherits them) and, when
+   * one is selected, to that shape as well. */
+  function handleStyleChange(partial: Partial<Style>) {
+    setStyle((s) => ({ ...s, ...partial }));
+    if (selectedShape) publishShapes(annotations.update(applyStyleToShape(selectedShape, partial)));
+  }
+
+  /** Rotation belongs to one shape rather than to the session style, so it
+   * writes straight through instead of going via `handleStyleChange`. */
+  function rotateSelected(degrees: number) {
+    if (!selectedShape || !isRotatable(selectedShape)) return;
+    const rotation = ((Math.round(degrees) % 360) + 360) % 360;
+    publishShapes(annotations.update({ ...selectedShape, rotation }));
+  }
+
+  function deleteSelected() {
+    if (!selectedId) return;
+    publishShapes(annotations.remove(selectedId));
+    setSelectedId(null);
+    setOpenPopover(null);
+  }
+
+  /** Hands the committed list to Rust, which fans it out to every overlay
+   * window. Called on commit and undo only, never per pointermove. */
+  function publishShapes(shapes: Shape[]) {
+    overlaySetShapes(JSON.stringify(shapes)).catch((err) =>
+      console.error("publishing overlay shapes failed", err),
+    );
+  }
+
+  /** Starts (or, for the click-placed tools, completes) an annotation. */
+  function beginAnnotation(p: PhysPoint, e: React.PointerEvent) {
+    if (!activeTool) return;
+    // Drawing replaces whatever was under edit, so the settings that open on
+    // commit belong to the shape just drawn.
+    setSelectedId(null);
+    if (activeTool === "marker") {
+      // Provisional number; the sequence is 1..n in placement order, which
+      // is all the overlay offers -- there is no delete-a-marker here.
+      const next = annotations.shapes.filter((s) => s.kind === "marker").length + 1;
+      commitShape(createMarker(crypto.randomUUID(), p, next, style));
+      return;
+    }
+    if (activeTool === "stamp") {
+      commitShape(createStamp(crypto.randomUUID(), p, style));
+      pushRecentStamp(style.stampEmoji);
+      return;
+    }
+    if (activeTool === "text") {
+      const box = containerRef.current?.getBoundingClientRect();
+      setTextValue("");
+      setTextEdit({ point: p, cssX: e.clientX - (box?.left ?? 0), cssY: e.clientY - (box?.top ?? 0) });
+      return;
+    }
+    drawStartRef.current = p;
+    drawingRef.current = true;
+    annotations.setDraft(
+      activeTool === "freehand"
+        ? startFreehand("draft", p, style)
+        : makeDraft(activeTool, p, p, style, e.shiftKey),
+    );
+  }
+
+  function commitText() {
+    const edit = textEdit;
+    const value = textValue;
+    setTextEdit(null);
+    setTextValue("");
+    if (!edit || !value.trim()) return;
+    commitShape(
+      createText(crypto.randomUUID(), edit.point, value, style.stroke, style.fontSize, style),
+    );
+  }
+
+  /** Commits a shape, broadcasts it, and leaves it selected with its settings
+   * open -- draw something, tune it, close, draw the next. */
+  function commitShape(shape: Shape) {
+    publishShapes(annotations.commit(shape));
+    setSelectedId(shape.id);
+    setOpenPopover("options");
+  }
+
   function handlePointerDown(e: React.PointerEvent) {
     if (pickWindow) return;
     const p = toPhys(e.clientX, e.clientY);
@@ -427,23 +693,61 @@ export function Overlay({ params }: OverlayProps) {
     }
     (e.target as Element).setPointerCapture(e.pointerId);
 
-    if (selection && containerRef.current && monitor) {
-      const sx = monitor.rect.w / containerRef.current.clientWidth;
-      const handle = pickHandle(selection, p, HANDLE_HIT_CSS_PX * sx);
-      if (handle) {
-        dragModeRef.current = handle;
-        dragOrigRectRef.current = selection;
-        dragStartRef.current = p;
-        setDragMode(handle);
-        return;
-      }
-      if (rectContains(selection, p)) {
-        dragModeRef.current = "move";
-        dragOrigRectRef.current = selection;
-        dragStartRef.current = p;
-        setDragMode("move");
-        return;
-      }
+    // A press that dismisses something transient does only that; a second,
+    // separate press draws. Otherwise every dismissal would leave a stray
+    // shape behind -- the rule the translate popover already follows.
+    //
+    // Text commits and then stops here for a second reason: `commitText`
+    // selects the new shape and opens its settings, but this handler still
+    // holds the pre-commit `openPopover`, so the dropdown guard below cannot
+    // see it. Falling through would re-enter `beginAnnotation` and open a
+    // second textarea instead of showing the settings for the text just typed.
+    if (textEdit) {
+      commitText();
+      return;
+    }
+    if (openPopover) {
+      setOpenPopover(null);
+      return;
+    }
+
+    const scaleX =
+      containerRef.current && monitor ? monitor.rect.w / containerRef.current.clientWidth : 1;
+    const handle =
+      selection && containerRef.current && monitor
+        ? pickHandle(selection, p, HANDLE_HIT_CSS_PX * scaleX)
+        : null;
+    // Annotation is a region-mode affordance only; every other mode passes a
+    // null tool, which makes `pointerIntent` reduce to today's behaviour.
+    const intent = pointerIntent(p, {
+      selection,
+      activeTool: regionMode ? activeTool : null,
+      handle,
+    });
+
+    if (intent === "resize" && handle) {
+      dragModeRef.current = handle;
+      dragOrigRectRef.current = selection;
+      dragStartRef.current = p;
+      setDragMode(handle);
+      return;
+    }
+    if (intent === "pick-shape") {
+      const hit = pickShape(annotations.shapes, p);
+      setSelectedId(hit ? hit.id : null);
+      shapeDragRef.current = hit ? { orig: hit, start: p } : null;
+      return;
+    }
+    if (intent === "draw") {
+      beginAnnotation(p, e);
+      return;
+    }
+    if (intent === "move") {
+      dragModeRef.current = "move";
+      dragOrigRectRef.current = selection;
+      dragStartRef.current = p;
+      setDragMode("move");
+      return;
     }
 
     // Outside any existing selection (or there isn't one yet) -- start
@@ -526,6 +830,23 @@ export function Overlay({ params }: OverlayProps) {
         const dy = Math.abs(p.y - m.start.y);
         return { ...m, end: dx >= dy ? { x: p.x, y: m.start.y } : { x: m.start.x, y: p.y } };
       });
+      return;
+    }
+
+    const shapeDrag = shapeDragRef.current;
+    if (shapeDrag) {
+      setLiveEdit(moveShape(shapeDrag.orig, p.x - shapeDrag.start.x, p.y - shapeDrag.start.y));
+      return;
+    }
+
+    if (drawingRef.current && activeTool) {
+      const start = drawStartRef.current;
+      if (!start) return;
+      if (activeTool === "freehand") {
+        annotations.setDraft((d) => (d && d.kind === "freehand" ? extendFreehand(d, p) : d));
+      } else {
+        annotations.setDraft(makeDraft(activeTool, start, p, style, e.shiftKey));
+      }
       return;
     }
 
@@ -618,6 +939,36 @@ export function Overlay({ params }: OverlayProps) {
       return;
     }
 
+    const shapeDrag = shapeDragRef.current;
+    if (shapeDrag) {
+      shapeDragRef.current = null;
+      const moved = liveEdit;
+      setLiveEdit(null);
+      // One undo step for the whole drag, not one per pointermove.
+      if (moved) publishShapes(annotations.update(moved));
+      // A click rather than a drag means "show me this shape's settings".
+      else setOpenPopover("options");
+      return;
+    }
+
+    if (drawingRef.current) {
+      drawingRef.current = false;
+      const start = drawStartRef.current;
+      drawStartRef.current = null;
+      const draft = annotations.draft;
+      const p = toPhys(e.clientX, e.clientY);
+      // A click rather than a drag would otherwise commit a zero-size shape,
+      // invisible but real -- the same slop the window-snap click uses.
+      const travelled =
+        p && start ? Math.hypot(p.x - start.x, p.y - start.y) : Number.POSITIVE_INFINITY;
+      if (draft && travelled >= CLICK_SLOP_PX) {
+        commitShape({ ...draft, id: crypto.randomUUID() });
+      } else {
+        annotations.setDraft(null);
+      }
+      return;
+    }
+
     const mode = dragModeRef.current;
 
     // Ctrl+click (rather than a drag) on a window in region mode snaps the
@@ -679,7 +1030,44 @@ export function Overlay({ params }: OverlayProps) {
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
       if (e.key === "Escape") {
+        // Escape steps back out one layer at a time: the colour picker first
+        // (it opens inside the settings dropdown), then the dropdown, then
+        // the selection, then the tool, and only then the capture.
+        if (openPopover === "color") {
+          setOpenPopover("options");
+          return;
+        }
+        if (openPopover) {
+          setOpenPopover(null);
+          return;
+        }
+        if (selectedId) {
+          setSelectedId(null);
+          return;
+        }
+        // Escape disarms an annotation tool first: with one armed it is far
+        // likelier to mean "stop drawing" than "throw the capture away",
+        // and a second press still cancels.
+        if (regionMode && activeTool) {
+          setActiveTool(null);
+          return;
+        }
         handleCancel();
+        return;
+      }
+      if (regionMode && (e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "z") {
+        e.preventDefault();
+        const next = e.shiftKey
+          ? annotationsRef.current.redo()
+          : annotationsRef.current.undo();
+        publishShapes(next);
+        // The shape under edit may have just been undone out of existence.
+        setSelectedId(null);
+        return;
+      }
+      if (regionMode && (e.key === "Delete" || e.key === "Backspace") && selectedId) {
+        e.preventDefault();
+        deleteSelected();
         return;
       }
       if (colorMode && e.key.toLowerCase() === "f") {
@@ -706,7 +1094,7 @@ export function Overlay({ params }: OverlayProps) {
       window.removeEventListener("keydown", onKeyDown);
       window.removeEventListener("keyup", onKeyUp);
     };
-  }, [pickWindow, translateMode, colorMode, measureMode, measurement, regionMode]);
+  }, [pickWindow, translateMode, colorMode, measureMode, measurement, regionMode, activeTool, openPopover, selectedId]);
 
   const monitorOrigin: PhysPoint = monitor
     ? { x: monitor.rect.x, y: monitor.rect.y }
@@ -754,36 +1142,41 @@ export function Overlay({ params }: OverlayProps) {
   // edge of the monitor -- `sel`'s other positions are percent-based and
   // fine to center-anchor freely, but a fixed-width box centered on a
   // selection near either edge got cut off before this clamp existed.
-  // Cancel + pin + confirm: three 36px circles with two 8px gaps.
-  const ACTION_BUTTONS_W = 3 * 36 + 2 * 8;
+  // Cancel, pin, copy, save, edit, confirm: six 36px buttons with 8px gaps.
+  const ACTION_BUTTONS_W = 6 * 36 + 5 * 8;
   const ACTION_BUTTONS_H = 36;
-  const ACTION_MARGIN = 8;
+  // Select plus the configured tools (32px each), the settings chevron (24px,
+  // whose slot is always reserved), the separator, and undo/redo, plus the
+  // bar's own padding. Constant for a given tool set, so arming a tool cannot
+  // move the bar. Only used to keep it on screen, so an approximation within a
+  // few pixels is fine -- it just has to track the real content.
+  const quickToolsWidth = (overlayTools.length + 1) * 32 + 24 + 90;
+  const showQuickTools = regionMode && editable && sel !== null && overlayTools.length > 0;
+  /** The quick-tools bar, preferring above the selection. Placed first so the
+   * action cluster can step around it. */
+  const quickTools =
+    sel && containerRef.current
+      ? placeCluster(
+          sel,
+          { w: containerRef.current.clientWidth, h: containerRef.current.clientHeight },
+          { w: quickToolsWidth, h: ACTION_BUTTONS_H },
+          "above",
+        )
+      : { left: 0, top: 0 };
+
   /** Where the confirm/pin/cancel cluster sits, in CSS pixels, kept fully on
-   * this monitor. Preference order: just below the selection, else just above
-   * it, else pinned inside the bottom edge -- a selection spanning the full
-   * height (or sitting hard against an edge) has no room outside it at all,
-   * and previously the group was simply centered on the selection and could
-   * hang off any side. */
-  const actionButtons = (() => {
-    if (!sel || !containerRef.current) return { left: 0, top: 0 };
-    const cw = containerRef.current.clientWidth;
-    const ch = containerRef.current.clientHeight;
-    const half = ACTION_BUTTONS_W / 2;
-    const minLeft = ACTION_MARGIN + half;
-    const left = Math.min(
-      Math.max(((sel.left + sel.right) / 2) * cw, minLeft),
-      Math.max(cw - ACTION_MARGIN - half, minLeft),
-    );
-    const below = sel.bottom * ch + 10;
-    const above = sel.top * ch - ACTION_BUTTONS_H - 10;
-    const top =
-      below + ACTION_BUTTONS_H + ACTION_MARGIN <= ch
-        ? below
-        : above >= ACTION_MARGIN
-          ? above
-          : Math.max(ACTION_MARGIN, ch - ACTION_BUTTONS_H - ACTION_MARGIN);
-    return { left, top };
-  })();
+   * this monitor -- preferring below the selection, and stacking clear of the
+   * tool bar when a selection hugging an edge forces both onto the same side. */
+  const actionButtons =
+    sel && containerRef.current
+      ? placeCluster(
+          sel,
+          { w: containerRef.current.clientWidth, h: containerRef.current.clientHeight },
+          { w: ACTION_BUTTONS_W, h: ACTION_BUTTONS_H },
+          "below",
+          showQuickTools ? { top: quickTools.top, height: ACTION_BUTTONS_H } : null,
+        )
+      : { left: 0, top: 0 };
 
   const TRANSLATE_POPOVER_W = 320;
   const TRANSLATE_POPOVER_MARGIN = 8;
@@ -833,9 +1226,64 @@ export function Overlay({ params }: OverlayProps) {
     }
   }
 
-  function handleConfirm() {
+  /** Flattens the confirmed region and its annotations to PNG. The base
+   * pixels come from Rust rather than this window's frame canvas: a selection
+   * can span monitors, and each overlay window holds only its own monitor. */
+  async function flattenSelection(rect: PhysRect): Promise<Uint8Array> {
+    const imageId = await selectionRegionImage();
+    try {
+      const bitmap = await fetchShotImage(imageId);
+      const base = document.createElement("canvas");
+      base.width = bitmap.width;
+      base.height = bitmap.height;
+      base.getContext("2d")!.drawImage(bitmap, 0, 0);
+      bitmap.close();
+      // Image space, whose origin is the selection's top-left -- the single
+      // conversion point between the overlay and everything downstream.
+      return await flattenToPng(base, rebaseToRegion(annotations.shapes, rect));
+    } finally {
+      releaseImage(imageId).catch(() => {});
+    }
+  }
+
+  /** Confirms the capture, baking in any annotations. With none drawn this is
+   * byte-for-byte the original path: Rust composites from the frozen session
+   * and nothing round-trips through the webview. */
+  async function handleConfirm(dest: ConfirmDest = "default") {
+    const rect = selection;
     setSelection(null);
-    selectionConfirm();
+    try {
+      if (dest !== "default") await selectionSetDest(dest);
+      const route = confirmRoute(dest, postCapture, annotations.shapes.length > 0 && !!rect);
+      if (route === "plain") {
+        await selectionConfirm();
+      } else if (route === "editor") {
+        await selectionConfirmToEditor(shapesForEditor(rect));
+      } else {
+        await selectionConfirmAnnotated(await flattenSelection(rect!));
+      }
+    } catch (err) {
+      console.error("confirming the capture failed", err);
+    }
+  }
+
+  /** The annotations in image space, as the editor's `PendingEditorShapes`
+   * expects them. Empty string means "no annotations". */
+  function shapesForEditor(rect: PhysRect | null): string {
+    if (!rect || annotations.shapes.length === 0) return "";
+    return JSON.stringify(rebaseToRegion(annotations.shapes, rect));
+  }
+
+  /** Always the editor, whatever `post_capture` says -- and the annotations
+   * travel as shapes, so they arrive editable rather than baked in. */
+  async function handleEdit() {
+    const rect = selection;
+    setSelection(null);
+    try {
+      await selectionConfirmToEditor(shapesForEditor(rect));
+    } catch (err) {
+      console.error("opening the editor failed", err);
+    }
   }
   function handlePin() {
     setSelection(null);
@@ -863,6 +1311,13 @@ export function Overlay({ params }: OverlayProps) {
         ref={frameCanvasRef}
         className="absolute inset-0 w-full h-full pointer-events-none"
         style={{ imageRendering: "pixelated", visibility: imgLoaded ? "visible" : "hidden" }}
+      />
+
+      {/* Above the frozen frame, below the mask and every piece of chrome:
+       * annotations are part of the picture, not part of the UI. */}
+      <canvas
+        ref={annotationCanvasRef}
+        className="absolute inset-0 w-full h-full pointer-events-none"
       />
 
       {imgLoaded && (
@@ -893,7 +1348,9 @@ export function Overlay({ params }: OverlayProps) {
                   width: pct(sel.right - sel.left, 1),
                   height: pct(sel.bottom - sel.top, 1),
                   pointerEvents: editable ? "auto" : "none",
-                  cursor: editable ? "move" : undefined,
+                  // With a tool armed a press inside draws rather than moves,
+                  // so the move cursor would promise the wrong gesture.
+                  cursor: editable && !activeTool ? "move" : "crosshair",
                 }}
               />
               <span
@@ -1028,6 +1485,33 @@ export function Overlay({ params }: OverlayProps) {
             onClick={() => handlePin()}
           />
           <IconButton
+            label="Copy to clipboard"
+            icon={<Copy size={16} />}
+            variant="secondary"
+            size="md"
+            className="shadow-[var(--shadow-md)]"
+            onClick={() => handleConfirm("copy")}
+          />
+          <IconButton
+            label="Save to file"
+            icon={<Download size={16} />}
+            variant="secondary"
+            size="md"
+            className="shadow-[var(--shadow-md)]"
+            onClick={() => handleConfirm("save")}
+          />
+          {/* Distinct from Confirm on purpose: Confirm runs whatever
+            * post-capture action is configured, which may not be the editor
+            * at all. */}
+          <IconButton
+            label="Open in editor"
+            icon={<Pencil size={16} />}
+            variant="secondary"
+            size="md"
+            className="shadow-[var(--shadow-md)]"
+            onClick={() => handleEdit()}
+          />
+          <IconButton
             label="Confirm capture"
             icon={<Check size={18} />}
             variant="primary"
@@ -1036,6 +1520,68 @@ export function Overlay({ params }: OverlayProps) {
             onClick={() => handleConfirm()}
           />
         </div>
+      )}
+
+      {showQuickTools && (
+        <QuickTools
+          tools={[SELECT_TOOL, ...overlayTools]}
+          activeTool={activeTool}
+          onSelectTool={(tool) => {
+            setActiveTool(tool);
+            // The settings belonged to whatever was under edit; arming a
+            // different tool ends that.
+            setSelectedId(null);
+            setOpenPopover(null);
+          }}
+          style={editedStyle}
+          onStyleChange={handleStyleChange}
+          optionsFor={optionsFor}
+          selectedShape={selectedShape}
+          onRotate={rotateSelected}
+          onDeleteSelected={selectedShape ? deleteSelected : null}
+          canUndo={annotations.canUndo}
+          onUndo={() => publishShapes(annotations.undo())}
+          canRedo={annotations.canRedo}
+          onRedo={() => publishShapes(annotations.redo())}
+          openPopover={openPopover}
+          onOpenPopover={setOpenPopover}
+          left={quickTools.left}
+          top={quickTools.top}
+        />
+      )}
+
+      {textEdit && monitor && containerRef.current && (
+        <textarea
+          ref={textareaRef}
+          rows={Math.max(1, textValue.split("\n").length)}
+          value={textValue}
+          onChange={(e) => setTextValue(e.target.value)}
+          onPointerDown={(e) => e.stopPropagation()}
+          onPointerUp={(e) => e.stopPropagation()}
+          onKeyDown={(e) => {
+            // Stopped from reaching the window handler, where Escape would
+            // cancel the whole capture and Enter would confirm it mid-word.
+            e.stopPropagation();
+            if (e.key === "Escape") {
+              setTextEdit(null);
+              setTextValue("");
+            } else if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+              commitText();
+            }
+          }}
+          className="absolute bg-transparent border border-dashed border-[var(--accent)] outline-none resize-none p-0.5"
+          style={{
+            left: textEdit.cssX,
+            top: textEdit.cssY,
+            // Font size is in physical pixels like the shape it becomes, so
+            // it has to come back down to CSS pixels to preview at scale.
+            fontSize: style.fontSize * (containerRef.current.clientWidth / monitor.rect.w),
+            color: style.stroke,
+            minWidth: 120,
+            fontFamily: "var(--font-sans)",
+            fontWeight: 600,
+          }}
+        />
       )}
 
       {translateMode && sel && translatePopover && (

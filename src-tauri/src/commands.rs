@@ -2,7 +2,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tauri::{AppHandle, Manager, PhysicalPosition, State};
+use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, State};
 
 use crate::capture::{MonitorInfo, ScreenCapturer, WindowInfo};
 use crate::images::ImageStore;
@@ -50,6 +50,23 @@ pub struct PostCaptureOverride(pub Mutex<Option<crate::settings::PostCaptureActi
 /// that consumes it fires long after this returns.
 #[derive(Default)]
 pub struct AutoSaveOverride(pub Mutex<Option<bool>>);
+
+/// Shapes annotated onto the current selection, as the JSON the overlay
+/// serialized. Held here rather than in any one overlay window because there
+/// is one window per monitor: a selection spanning two monitors is drawn on
+/// one of them, and the other needs to be told. Rust does not interpret the
+/// payload; it only fans it out and hands it to the editor on request.
+#[derive(Default)]
+pub struct OverlayShapes(pub Mutex<String>);
+
+/// Stores the committed shapes and tells every overlay window about them.
+/// Called on pointer-up only: publishing per pointermove would put a whole
+/// freehand stroke through IPC one point at a time.
+#[tauri::command]
+pub fn overlay_set_shapes(app: AppHandle, state: State<OverlayShapes>, json: String) {
+    *state.0.lock().unwrap() = json.clone();
+    let _ = app.emit("overlay:shapes", json);
+}
 
 /// Whether the main window was visible right before the most recent capture
 /// hid it. `selection::selection_cancel` re-shows the main window only when
