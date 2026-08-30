@@ -6,24 +6,22 @@ import { Segmented } from "../ui/Segmented";
 import { Slider } from "../ui/Slider";
 import { Switch } from "../ui/Switch";
 import { Select } from "../ui/Select";
+import { StampPicker } from "../ui/StampPicker";
 import type {
   Adjustments,
   ArrowStyle,
   Backdrop,
-  TextAlign,
   TextShape,
-  CensorMode,
   MeasureLine,
   Shape,
-  SpotlightForm,
   Style,
   ToolId,
 } from "./types";
 import { isRotatable } from "./types";
 import { measurementLabel } from "../lib/color";
-import { EMOJI_CATEGORIES, loadRecentStamps } from "./tools/stamp";
 import { ADJUST_PRESETS, IDENTITY_ADJUSTMENTS } from "./tools/adjust";
 import { BACKDROP_PRESETS, presetCss } from "./tools/backdrop";
+import { ARROW_STYLES, CENSOR_MODES, RANGES, SPOTLIGHT_FORMS, TEXT_ALIGNMENTS } from "./tools/labels";
 
 interface PropertiesPanelProps {
   tool: ToolId;
@@ -64,26 +62,8 @@ const SHOWS_SPOTLIGHT_DIM: ToolId[] = ["spotlight"];
  * qualifies only in its rect form, which `showRadius` checks separately. */
 const SHOWS_RADIUS: ToolId[] = ["rect", "spotlight"];
 
-const SPOTLIGHT_FORMS: { value: SpotlightForm; label: string }[] = [
-  { value: "rect", label: "Rectangle" },
-  { value: "ellipse", label: "Circle" },
-];
 
-const ARROW_STYLES: { value: ArrowStyle; label: string }[] = [
-  // Listed first because it is what the Line tool produces, and switching
-  // away from it is how a line becomes an arrow.
-  { value: "none", label: "No head (line)" },
-  { value: "single", label: "Single head" },
-  { value: "double", label: "Double-headed" },
-  { value: "open", label: "Open head" },
-  { value: "tail", label: "Fletched tail" },
-];
 
-const TEXT_ALIGNMENTS: { value: TextAlign; label: string }[] = [
-  { value: "left", label: "Left" },
-  { value: "center", label: "Center" },
-  { value: "right", label: "Right" },
-];
 
 /** Stored rotation (0..359) as a signed angle (-180..180), so the slider can
  * put the 0 default at the centre of its track. */
@@ -122,7 +102,7 @@ function FormatToggle({
       aria-label={label}
       aria-pressed={active}
       onClick={onClick}
-      className={`flex items-center justify-center w-9 h-9 rounded-[var(--radius-sm)] border ${
+      className={`flex flex-1 items-center justify-center h-9 rounded-[var(--radius-sm)] border ${
         active
           ? "bg-[var(--accent)] text-white border-[var(--accent)]"
           : "bg-[var(--surface)] text-[var(--fg)] border-[var(--border)] hover:bg-[var(--surface-hover)]"
@@ -133,44 +113,6 @@ function FormatToggle({
   );
 }
 
-const CENSOR_MODES: { value: CensorMode; label: string }[] = [
-  { value: "pixelate", label: "Pixels" },
-  { value: "blur", label: "Blur" },
-  { value: "solid", label: "Solid" },
-];
-
-/** Recents row plus the categorised grid. Recents are read once per mount:
- * the panel remounts whenever the tool changes, which is the only moment the
- * list could have grown since it was last shown. */
-function StampPicker({ value, onChange }: { value: string; onChange: (emoji: string) => void }) {
-  const recents = loadRecentStamps();
-  const groups = recents.length > 0 ? [{ name: "Recent", emoji: recents }, ...EMOJI_CATEGORIES] : EMOJI_CATEGORIES;
-  return (
-    <div className="flex flex-col gap-2 max-h-72 overflow-y-auto">
-      {groups.map((group) => (
-        <div key={group.name} className="flex flex-col gap-1">
-          <span className="text-[10px] uppercase tracking-wide text-[var(--fg-muted)]">{group.name}</span>
-          <div className="grid grid-cols-6 gap-0.5">
-            {group.emoji.map((emoji) => (
-              <button
-                key={`${group.name}-${emoji}`}
-                type="button"
-                aria-label={`Stamp ${emoji}`}
-                aria-pressed={value === emoji}
-                onClick={() => onChange(emoji)}
-                className={`flex items-center justify-center h-7 text-base rounded-[var(--radius-sm)] ${
-                  value === emoji ? "bg-[var(--accent)]/20 ring-1 ring-[var(--accent)]" : "hover:bg-[var(--surface-hover)]"
-                }`}
-              >
-                {emoji}
-              </button>
-            ))}
-          </div>
-        </div>
-      ))}
-    </div>
-  );
-}
 
 /** Output dimensions for the saved image. Lives with the adjustments rather
  * than in the status bar because it is another property of the exported
@@ -463,8 +405,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Stroke width"
               value={shape.strokeWidth}
-              min={1}
-              max={20}
+              {...RANGES.strokeWidth}
               onChange={(strokeWidth) => {
                 onUpdateShape({ ...shape, strokeWidth });
                 onChange({ strokeWidth });
@@ -477,8 +418,7 @@ function SelectedShapeFields({
               <Slider
                 aria-label="Corner radius"
                 value={shape.radius ?? 0}
-                min={0}
-                max={100}
+                {...RANGES.cornerRadius}
                 onChange={(radius) => {
                   onUpdateShape({ ...shape, radius });
                   onChange({ radius });
@@ -505,8 +445,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Stroke width"
               value={shape.strokeWidth}
-              min={1}
-              max={20}
+              {...RANGES.strokeWidth}
               onChange={(strokeWidth) => {
                 onUpdateShape({ ...shape, strokeWidth });
                 onChange({ strokeWidth });
@@ -567,8 +506,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Font size"
               value={shape.fontSize}
-              min={10}
-              max={72}
+              {...RANGES.fontSize}
               onChange={(fontSize) => {
                 onUpdateShape({ ...shape, fontSize });
                 onChange({ fontSize });
@@ -614,6 +552,7 @@ function SelectedShapeFields({
           </Field>
           <Field label="Alignment">
             <Segmented
+              fullWidth
               aria-label="Text alignment"
               size="sm"
               value={shape.align ?? "left"}
@@ -668,8 +607,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Stamp size"
               value={shape.size}
-              min={12}
-              max={200}
+              {...RANGES.stampSize}
               onChange={(size) => onUpdateShape({ ...shape, size })}
             />
           </Field>
@@ -691,9 +629,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Magnification"
               value={shape.factor}
-              min={1.5}
-              max={4}
-              step={0.5}
+              {...RANGES.loupeFactor}
               onChange={(factor) => {
                 onUpdateShape({ ...shape, factor });
                 onChange({ loupeFactor: factor });
@@ -704,8 +640,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Ring width"
               value={shape.strokeWidth}
-              min={1}
-              max={20}
+              {...RANGES.strokeWidth}
               onChange={(strokeWidth) => {
                 onUpdateShape({ ...shape, strokeWidth });
                 onChange({ strokeWidth });
@@ -732,6 +667,7 @@ function SelectedShapeFields({
         <>
           <Field label="Censor with">
             <Segmented
+              fullWidth
               aria-label="Censor mode"
               size="sm"
               value={mode}
@@ -758,8 +694,7 @@ function SelectedShapeFields({
               <Slider
                 aria-label={mode === "blur" ? "Blur amount" : "Pixelate block size"}
                 value={shape.blockSize}
-                min={4}
-                max={40}
+                {...RANGES.censorAmount}
                 onChange={(blockSize) => {
                   onUpdateShape({ ...shape, blockSize });
                   onChange({ pixelateBlock: blockSize });
@@ -775,6 +710,7 @@ function SelectedShapeFields({
         <>
           <Field label="Shape">
             <Segmented
+              fullWidth
               aria-label="Spotlight shape"
               size="sm"
               value={shape.form}
@@ -789,8 +725,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Spotlight dim"
               value={Math.round(shape.dimOpacity * 100)}
-              min={10}
-              max={90}
+              {...RANGES.spotlightDim}
               onChange={(percent) => {
                 onUpdateShape({ ...shape, dimOpacity: percent / 100 });
                 onChange({ spotlightDim: percent / 100 });
@@ -803,8 +738,7 @@ function SelectedShapeFields({
               <Slider
                 aria-label="Corner radius"
                 value={shape.radius ?? 0}
-                min={0}
-                max={100}
+                {...RANGES.cornerRadius}
                 onChange={(radius) => {
                   onUpdateShape({ ...shape, radius });
                   onChange({ radius });
@@ -833,8 +767,7 @@ function SelectedShapeFields({
             <Slider
               aria-label="Marker size"
               value={shape.radius}
-              min={8}
-              max={40}
+              {...RANGES.markerSize}
               onChange={(radius) => {
                 onUpdateShape({ ...shape, radius });
                 onChange({ markerSize: radius });
@@ -972,8 +905,7 @@ export function PropertiesPanel({
               // from it. Stored as 0..359, which is what the render
               // transform and the mirror maths work in.
               value={signedRotation(selectedShape.rotation ?? 0)}
-              min={-180}
-              max={180}
+              {...RANGES.rotation}
               onChange={(degrees) =>
                 onUpdateShape({ ...selectedShape, rotation: normalizeRotation(degrees) })
               }
@@ -1046,6 +978,7 @@ export function PropertiesPanel({
       {showSpotlightDim && (
         <Field label="Shape">
           <Segmented
+            fullWidth
             aria-label="Spotlight shape"
             size="sm"
             value={style.spotlightForm}
@@ -1059,8 +992,7 @@ export function PropertiesPanel({
           <Slider
             aria-label="Spotlight dim"
             value={Math.round(style.spotlightDim * 100)}
-            min={10}
-            max={90}
+            {...RANGES.spotlightDim}
             onChange={(percent) => onChange({ spotlightDim: percent / 100 })}
           />
         </Field>
@@ -1090,8 +1022,7 @@ export function PropertiesPanel({
           <Slider
             aria-label="Stroke width"
             value={style.strokeWidth}
-            min={1}
-            max={20}
+            {...RANGES.strokeWidth}
             onChange={(strokeWidth) => onChange({ strokeWidth })}
           />
         </Field>
@@ -1101,8 +1032,7 @@ export function PropertiesPanel({
           <Slider
             aria-label="Corner radius"
             value={style.radius}
-            min={0}
-            max={100}
+            {...RANGES.cornerRadius}
             onChange={(radius) => onChange({ radius })}
           />
         </Field>
@@ -1113,8 +1043,7 @@ export function PropertiesPanel({
             <Slider
               aria-label="Font size"
               value={style.fontSize}
-              min={10}
-              max={72}
+              {...RANGES.fontSize}
               onChange={(fontSize) => onChange({ fontSize })}
             />
           </Field>
@@ -1145,6 +1074,7 @@ export function PropertiesPanel({
           </Field>
           <Field label="Alignment">
             <Segmented
+              fullWidth
               aria-label="Text alignment"
               size="sm"
               value={style.textAlign}
@@ -1196,9 +1126,7 @@ export function PropertiesPanel({
           <Slider
             aria-label="Magnification"
             value={style.loupeFactor}
-            min={1.5}
-            max={4}
-            step={0.5}
+            {...RANGES.loupeFactor}
             onChange={(loupeFactor) => onChange({ loupeFactor })}
           />
         </Field>
@@ -1229,6 +1157,7 @@ export function PropertiesPanel({
         <>
           <Field label="Censor with">
             <Segmented
+              fullWidth
               aria-label="Censor mode"
               size="sm"
               value={style.censorMode}
@@ -1249,8 +1178,7 @@ export function PropertiesPanel({
               <Slider
                 aria-label={style.censorMode === "blur" ? "Blur amount" : "Pixelate block size"}
                 value={style.pixelateBlock}
-                min={4}
-                max={40}
+                {...RANGES.censorAmount}
                 onChange={(pixelateBlock) => onChange({ pixelateBlock })}
               />
             </Field>
@@ -1262,8 +1190,7 @@ export function PropertiesPanel({
           <Slider
             aria-label="Marker size"
             value={style.markerSize}
-            min={8}
-            max={40}
+            {...RANGES.markerSize}
             onChange={(markerSize) => onChange({ markerSize })}
           />
         </Field>

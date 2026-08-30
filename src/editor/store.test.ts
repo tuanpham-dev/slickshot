@@ -245,3 +245,37 @@ describe("line and arrow share one shape", () => {
     expect(useEditorStore.getState().style.arrowStyle).toBe("tail");
   });
 });
+
+describe("editor store — shapes handed over from the capture overlay", () => {
+  it("seeds the canvas with them", () => {
+    useEditorStore.getState().setImage("handoff", 100, 100, [rect("a"), rect("b")]);
+    expect(useEditorStore.getState().shapes.map((s) => s.id)).toEqual(["a", "b"]);
+  });
+
+  // The editor window is pre-warmed and keeps its last tool; without this a
+  // handoff would open with a drawing tool armed and the first click on a
+  // handed-over shape would draw over it instead of selecting it.
+  it("arms the select tool so they can actually be selected", () => {
+    useEditorStore.getState().setTool("rect");
+    useEditorStore.getState().setImage("handoff", 100, 100, [rect("a")]);
+    expect(useEditorStore.getState().tool).toBe("select");
+  });
+
+  it("leaves the armed tool alone for a capture with no annotations", () => {
+    useEditorStore.getState().setTool("rect");
+    useEditorStore.getState().setImage("plain", 100, 100);
+    expect(useEditorStore.getState().tool).toBe("rect");
+  });
+
+  it("starts with an empty undo stack -- the shapes are the starting state", () => {
+    useEditorStore.getState().setImage("handoff", 100, 100, [rect("a")]);
+    expect(useEditorStore.getState().past).toEqual([]);
+    expect(useEditorStore.getState().dirty).toBe(false);
+  });
+
+  it("does not carry shapes into the next capture", () => {
+    useEditorStore.getState().setImage("handoff", 100, 100, [rect("a")]);
+    useEditorStore.getState().setImage("next", 100, 100);
+    expect(useEditorStore.getState().shapes).toEqual([]);
+  });
+});

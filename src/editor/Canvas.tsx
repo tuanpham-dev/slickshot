@@ -17,20 +17,15 @@ import {
   type Shape,
 } from "./types";
 import { measurementLabel, type Rgb } from "../lib/color";
-import { createRect } from "./tools/rect";
-import { createEllipse } from "./tools/ellipse";
-import { createArrow } from "./tools/arrow";
+import { makeDraft } from "./tools/draft";
 import { startFreehand, extendFreehand } from "./tools/freehand";
-import { clusterWordsToLines, createHighlight, snapHighlightToLines } from "./tools/highlight";
-import { createPixelate } from "./tools/pixelate";
+import { clusterWordsToLines, snapHighlightToLines } from "./tools/highlight";
 import { createMarker } from "./tools/marker";
 import { createStamp, pushRecentStamp } from "./tools/stamp";
-import { createLoupe } from "./tools/loupe";
 import { snapShapeDrag, type AlignGuide } from "./tools/snap";
 import { applyAdjustments, isIdentity } from "./tools/adjust";
 import { createText } from "./tools/text";
 import { pickShape, pickHandle, cloneShape, moveShape, resizeShape } from "./tools/select";
-import { createSpotlight } from "./tools/spotlight";
 import { createCropRect, moveCropRect, resizeCropRect } from "./tools/crop";
 import { presetCss } from "./tools/backdrop";
 import type { PhysRect } from "../lib/geometry";
@@ -726,37 +721,6 @@ export function Canvas({
       {content}
     </div>
   );
-}
-
-function makeDraft(
-  tool: string,
-  start: ImgPoint,
-  current: ImgPoint,
-  style: import("./types").Style,
-  constrain: boolean,
-): Shape | null {
-  const id = "draft";
-  switch (tool) {
-    case "rect":
-      return createRect(id, start, current, style, constrain);
-    case "ellipse":
-      return createEllipse(id, start, current, style, constrain);
-    // Line is the Arrow tool starting from the headless style: one shape,
-    // one factory, and the head dropdown drives whichever tool is active.
-    case "arrow":
-    case "line":
-      return createArrow(id, start, current, style, constrain);
-    case "highlight":
-      return createHighlight(id, start, current, style);
-    case "pixelate":
-      return createPixelate(id, start, current, style);
-    case "spotlight":
-      return createSpotlight(id, start, current, style);
-    case "loupe":
-      return createLoupe(id, start, current, style);
-    default:
-      return null;
-  }
 }
 
 function cursorFor(tool: string): string {

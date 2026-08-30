@@ -14,6 +14,11 @@ interface SegmentedProps<T extends string> {
    * `size="sm"` (the inner options are already h-8; the default's 2px
    * padding on top of that is what makes it taller than a sm button). */
   size?: "sm" | "md";
+  /** Stretches the group to its container and shares the width evenly between
+   * options, for settings panels where every control lines up on one edge.
+   * Off by default: inline groups (a toolbar, a label-and-control row) want
+   * to size to their content. */
+  fullWidth?: boolean;
 }
 
 export function Segmented<T extends string>({
@@ -21,6 +26,7 @@ export function Segmented<T extends string>({
   value,
   onChange,
   size = "md",
+  fullWidth = false,
   ...rest
 }: SegmentedProps<T>) {
   const buttonRefs = useRef<Array<HTMLButtonElement | null>>([]);
@@ -70,7 +76,9 @@ export function Segmented<T extends string>({
     <div
       role="radiogroup"
       aria-label={rest["aria-label"]}
-      className="inline-flex items-center rounded-[var(--radius-md)] bg-[var(--surface-2)] p-0.5 border border-[var(--border)]"
+      className={`${
+        fullWidth ? "flex w-full" : "inline-flex"
+      } items-center rounded-[var(--radius-md)] bg-[var(--surface-2)] p-0.5 border border-[var(--border)]`}
     >
       {options.map((opt, index) => {
         const selected = opt.value === value;
@@ -88,6 +96,7 @@ export function Segmented<T extends string>({
             onKeyDown={(e) => onKeyDown(e, index)}
             className={[
               size === "sm" ? "px-2.5 h-7" : "px-2.5 h-8",
+              fullWidth ? "flex-1" : "",
               "rounded-[calc(var(--radius-md)-2px)] text-xs font-medium transition-colors",
               "duration-[var(--duration-fast)] focus-visible:shadow-[var(--focus-ring)]",
               selected

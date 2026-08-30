@@ -39,11 +39,16 @@ export function ColorSwatch({ color, selected, onClick, label }: ColorSwatchProp
 interface ColorPickerProps {
   value: string;
   onChange: (color: string) => void;
+  /** Optional controlled state, for callers that need Escape and outside
+   * clicks handled somewhere other than inside this component -- the capture
+   * overlay owns those keys itself. Omit both to keep it self-managing. */
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
-export function ColorPicker({ value, onChange }: ColorPickerProps) {
+export function ColorPicker({ value, onChange, open, onOpenChange }: ColorPickerProps) {
   return (
-    <RadixPopover.Root>
+    <RadixPopover.Root open={open} onOpenChange={onOpenChange}>
       <RadixPopover.Trigger asChild>
         <button
           type="button"
@@ -55,6 +60,10 @@ export function ColorPicker({ value, onChange }: ColorPickerProps) {
       <RadixPopover.Portal>
         <RadixPopover.Content
           sideOffset={8}
+          // When controlled, the caller owns Escape: closing here as well
+          // would swap its key listener mid-dispatch and the same keypress
+          // would fall through to whatever it handles next.
+          onEscapeKeyDown={open === undefined ? undefined : (e) => e.preventDefault()}
           className="z-50 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-md)] p-3 flex flex-col gap-3 w-52"
         >
           <div className="grid grid-cols-4 gap-2">

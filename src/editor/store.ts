@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import type { PhysRect } from "../lib/geometry";
+import { DEFAULT_STYLE } from "./types";
 import type { Adjustments, Backdrop, MeasureLine, PanelOverride, Shape, Style, ToolId } from "./types";
 import { IDENTITY_ADJUSTMENTS } from "./tools/adjust";
 import { cloneShape, mirrorShape, moveShape } from "./tools/select";
@@ -41,7 +42,18 @@ interface EditorState {
   measureLine: MeasureLine | null;
   dirty: boolean;
 
-  setImage: (id: string, width: number, height: number) => void;
+  /** `initialShapes` seeds the canvas with shapes drawn elsewhere -- the
+   * capture overlay's quick annotations. Defaults to empty, so every existing
+   * caller is unchanged. The undo stack still starts empty: the shapes arrive
+   * as the image's starting state, not as a step to undo back past.
+   *
+   * Seeded shapes also arm the select tool. The editor window is pre-warmed
+   * and keeps whatever tool was last used, so a capture carrying annotations
+   * would otherwise open with (say) Rectangle armed, and the first click on
+   * one of those annotations would draw over it instead of selecting it --
+   * making shapes that were handed over expressly to be editable look like
+   * baked-in pixels. */
+  setImage: (id: string, width: number, height: number, initialShapes?: Shape[]) => void;
   setTool: (tool: ToolId) => void;
   setStyle: (partial: Partial<Style>) => void;
   setBackdrop: (partial: Partial<Backdrop>) => void;
@@ -76,30 +88,6 @@ interface EditorState {
   setOcrRect: (rect: PhysRect | null) => void;
   setMeasureLine: (line: MeasureLine | null) => void;
 }
-
-const DEFAULT_STYLE: Style = {
-  stroke: "#e2372f",
-  fill: null,
-  strokeWidth: 3,
-  fontSize: 20,
-  opacity: 1,
-  arrowStyle: "single",
-  arrowBanner: false,
-  textBold: false,
-  textItalic: false,
-  textUnderline: false,
-  textAlign: "left",
-  textBgColor: null,
-  stampEmoji: "✅",
-  loupeFactor: 2,
-  pixelateBlock: 12,
-  censorMode: "pixelate",
-  censorColor: "#000000",
-  markerSize: 14,
-  spotlightDim: 0.6,
-  spotlightForm: "rect",
-  radius: 0,
-};
 
 const DEFAULT_BACKDROP: Backdrop = {
   enabled: false,
@@ -142,12 +130,13 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   // pre-warmed and reused across captures (see `editor::show` in Rust), so
   // a new image arriving must not inherit the previous capture's shapes,
   // history, crop, or dirty flag.
-  setImage: (id, width, height) =>
+  setImage: (id, width, height, initialShapes = []) =>
     set({
       imageId: id,
+      ...(initialShapes.length > 0 ? { tool: "select" as ToolId } : {}),
       imageWidth: width,
       imageHeight: height,
-      shapes: [],
+      shapes: initialShapes,
       draft: null,
       selectedId: null,
       past: [],

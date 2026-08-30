@@ -541,3 +541,30 @@ export function hitTest(s: Shape, p: ImgPoint, pad = 6): boolean {
   const local = toLocalPoint(p, s);
   return local.x >= b.x - pad && local.x <= b.x + b.w + pad && local.y >= b.y - pad && local.y <= b.y + b.h + pad;
 }
+
+/** What every newly drawn shape starts from. Lives here rather than in the
+ * editor store so the capture overlay can share it without pulling in a
+ * per-window zustand store it has no use for. */
+export const DEFAULT_STYLE: Style = {
+  stroke: "#e2372f",
+  fill: null,
+  strokeWidth: 3,
+  fontSize: 20,
+  opacity: 1,
+  arrowStyle: "single",
+  arrowBanner: false,
+  textBold: false,
+  textItalic: false,
+  textUnderline: false,
+  textAlign: "left",
+  textBgColor: null,
+  stampEmoji: "✅",
+  loupeFactor: 2,
+  pixelateBlock: 12,
+  censorMode: "pixelate",
+  censorColor: "#000000",
+  markerSize: 14,
+  spotlightDim: 0.6,
+  spotlightForm: "rect",
+  radius: 0,
+};
