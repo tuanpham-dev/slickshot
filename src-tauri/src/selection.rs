@@ -122,6 +122,7 @@ pub fn selection_cancel(
     *app.state::<crate::cli::CliSink>().0.lock().unwrap() = None;
     *app.state::<crate::commands::QuicksaveSink>().0.lock().unwrap() = false;
     *app.state::<crate::commands::PostCaptureOverride>().0.lock().unwrap() = None;
+    *app.state::<crate::commands::AutoSaveOverride>().0.lock().unwrap() = None;
     crate::overlay::close_overlays(&app);
     if *main_was_visible.0.lock().unwrap() {
         let _ = crate::commands::show_main_window(app);

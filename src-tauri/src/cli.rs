@@ -118,6 +118,12 @@ pub struct OutputArgs {
     /// `-c` or `--stdout` sink is given -- those export directly instead.
     #[arg(long, value_enum)]
     pub post_capture: Option<PostCaptureArg>,
+    /// Keep the capture even when nothing else would, overriding the saved
+    /// setting for this run: writes it to the save folder when
+    /// `--post-capture none` is used, or when a thumbnail is left to time
+    /// out. `--auto-save false` discards instead.
+    #[arg(long, num_args = 0..=1, default_missing_value = "true")]
+    pub auto_save: Option<bool>,
 }
 
 /// Mirrors `settings::PostCaptureAction` as a clap-parseable value.
@@ -461,6 +467,7 @@ fn spawn_capture(app: AppHandle, mode: CaptureMode, capture: CaptureArgs) {
         .post_capture
         .map(Into::into)
         .or(capture.output.edit.then_some(crate::settings::PostCaptureAction::Editor));
+    *app.state::<crate::commands::AutoSaveOverride>().0.lock().unwrap() = capture.output.auto_save;
     tauri::async_runtime::spawn(async move {
         let capturer = app.state::<Capturer>();
         let session = app.state::<Mutex<Option<CaptureSession>>>();

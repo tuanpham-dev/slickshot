@@ -94,6 +94,10 @@ fn default_auto_check_updates() -> bool {
     true
 }
 
+fn default_auto_save() -> bool {
+    true
+}
+
 /// Parses `hotkeys` leniently: each array element that fails to deserialize
 /// (most commonly a `mode` value naming a `CaptureMode` variant that has
 /// since been removed, e.g. a retired capture mode) is silently dropped
@@ -132,6 +136,12 @@ pub struct Settings {
     pub copy_on_capture: bool,
     #[serde(default = "default_post_capture")]
     pub post_capture: PostCaptureAction,
+    /// Writes the capture to the save folder when nothing else would keep
+    /// it: `post_capture: None`, or a thumbnail left to time out. Without
+    /// this a capture taken and walked away from is simply lost, so it
+    /// defaults on -- the explicit Discard button is how you throw one away.
+    #[serde(default = "default_auto_save")]
+    pub auto_save: bool,
     pub theme: ThemeOverride,
     /// Master switch for OCR translation: OFF by default -- enabling it
     /// sends OCR'd text to Google's translate endpoint, which should be an
@@ -202,6 +212,7 @@ impl Default for Settings {
             open_editor_after_capture: true,
             copy_on_capture: false,
             post_capture: PostCaptureAction::default(),
+            auto_save: default_auto_save(),
             theme: ThemeOverride::System,
             translate_enabled: false,
             translate_target: default_translate_target(),
@@ -388,6 +399,24 @@ mod tests {
             serde_json::from_value(old_json).expect("a retired hotkey mode must not fail deserialization");
         assert_eq!(settings.hotkeys.len(), 1);
         assert_eq!(settings.hotkeys[0].mode, CaptureMode::Region);
+    }
+
+    /// A `settings.json` predating auto-save must default it on: the whole
+    /// point is that a capture nobody acted on is kept rather than lost.
+    #[test]
+    fn old_settings_default_auto_save_on() {
+        let old_json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": true,
+            "copy_on_capture": false,
+            "theme": "system"
+        });
+        let settings = parse_settings_value(old_json).expect("old settings.json must still parse");
+        assert!(settings.auto_save);
     }
 
     /// A `settings.json` predating `post_capture` that had the editor

@@ -28,7 +28,7 @@ use std::sync::{Mutex, OnceLock};
 use clap::Parser;
 use tauri::Manager;
 
-use commands::{Capturer, MainWasVisible, PostCaptureOverride, QuicksaveSink};
+use commands::{AutoSaveOverride, Capturer, MainWasVisible, PostCaptureOverride, QuicksaveSink};
 use editor::EditorImage;
 use export::PendingExport;
 use images::ImageStore;
@@ -81,6 +81,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .manage(cli::CliSink::default())
         .manage(QuicksaveSink::default())
         .manage(PostCaptureOverride::default())
+        .manage(AutoSaveOverride::default())
         .manage(thumbnail::ThumbnailImage::default())
         .manage(update::PendingUpdate::default())
         .manage(ready::MountedWindows::default())

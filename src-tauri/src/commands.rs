@@ -44,6 +44,13 @@ pub struct QuicksaveSink(pub Mutex<bool>);
 #[derive(Default)]
 pub struct PostCaptureOverride(pub Mutex<Option<crate::settings::PostCaptureAction>>);
 
+/// A one-shot override of `settings.auto_save`, set by the CLI's
+/// `--auto-save` flag. Taken by `deliver_capture`, which resolves it once and
+/// -- for the thumbnail -- hands the result to the window, since the timeout
+/// that consumes it fires long after this returns.
+#[derive(Default)]
+pub struct AutoSaveOverride(pub Mutex<Option<bool>>);
+
 /// Whether the main window was visible right before the most recent capture
 /// hid it. `selection::selection_cancel` re-shows the main window only when
 /// this is true, so dismissing a hotkey-triggered capture (main window
@@ -102,6 +109,13 @@ pub async fn deliver_capture(
         .unwrap()
         .take()
         .unwrap_or(settings.post_capture);
+    let auto_save = app
+        .state::<AutoSaveOverride>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .unwrap_or(settings.auto_save);
 
     if settings.copy_on_capture {
         if let Some(img) = app.state::<ImageStore>().get(&image_id) {
@@ -112,11 +126,17 @@ pub async fn deliver_capture(
     match action {
         crate::settings::PostCaptureAction::Editor => crate::editor::show(app, &image_id).await,
         crate::settings::PostCaptureAction::Thumbnail => {
-            crate::thumbnail::show(app, &image_id, rect).await
+            crate::thumbnail::show(app, &image_id, rect, auto_save).await
         }
         crate::settings::PostCaptureAction::None => {
-            // Nothing will render these pixels, so don't hold them: the
-            // clipboard copy above (if any) already owns its own buffer.
+            // Nothing is going to render these pixels, so this is the last
+            // chance to keep them: without auto-save the capture is simply
+            // discarded, which is why auto-save defaults on.
+            if auto_save {
+                if let Some(img) = app.state::<ImageStore>().get(&image_id) {
+                    crate::export::autosave_image(app, &img)?;
+                }
+            }
             app.state::<ImageStore>().remove(&image_id);
             Ok(())
         }

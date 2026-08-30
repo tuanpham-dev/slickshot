@@ -135,6 +135,7 @@ export interface AppSettings {
   open_editor_after_capture: boolean;
   copy_on_capture: boolean;
   post_capture: "editor" | "thumbnail" | "none";
+  auto_save: boolean;
   theme: "system" | "light" | "dark";
   translate_enabled: boolean;
   translate_target: string;
@@ -395,7 +396,9 @@ export interface OcrWordBox {
 export type ThumbnailAction = "copy" | "quicksave" | "pin" | "edit" | "upload";
 
 export const thumbnailReady = () => call<void>("thumbnail_ready");
-export const thumbnailClose = () => call<void>("thumbnail_close");
+/** `discard: true` throws the capture away; `false` (a timeout) lets
+ * auto-save keep it. */
+export const thumbnailClose = (discard: boolean) => call<void>("thumbnail_close", { discard });
 export const thumbnailAction = (action: ThumbnailAction) =>
   call<void>("thumbnail_action", { action });
 

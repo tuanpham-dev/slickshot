@@ -94,6 +94,10 @@ export interface Adjustments {
   preset: string;
 }
 
+/** A document-level editor that takes over the properties panel while open.
+ * `null` means the panel belongs to the active tool or selected shape. */
+export type PanelOverride = "adjust" | "backdrop" | null;
+
 interface ShapeBase {
   id: string;
 }

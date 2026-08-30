@@ -213,9 +213,12 @@ export function Editor({ params }: EditorProps) {
     setMeasureLine,
     setAdjustments,
     flipImage,
-    adjustOpen,
-    setAdjustOpen,
+    panelOverride,
+    setPanelOverride,
   } = useEditorStore();
+
+  const adjustOpen = panelOverride === "adjust";
+  const backdropOpen = panelOverride === "backdrop";
 
   useEffect(() => {
     const unlisten = onEditorImage(setImageId);
@@ -1018,10 +1021,17 @@ export function Editor({ params }: EditorProps) {
         tool={tool}
         onToolChange={handleToolChange}
         onInsertImage={handleInsertImage}
-        onToggleBackdrop={() => setBackdrop({ enabled: !backdrop.enabled })}
+        onToggleBackdrop={() => {
+          // Enabling a backdrop is a request to style it, so the panel comes
+          // with it; disabling hands the panel back rather than leaving the
+          // options for something that is no longer drawn.
+          const enabled = !backdrop.enabled;
+          setBackdrop({ enabled });
+          setPanelOverride(enabled ? "backdrop" : null);
+        }}
         backdropEnabled={backdrop.enabled}
         ocrUnavailable={ocrStatus !== null && !ocrStatus.available}
-        onToggleAdjust={() => setAdjustOpen(!adjustOpen)}
+        onToggleAdjust={() => setPanelOverride(adjustOpen ? null : "adjust")}
         adjustOpen={adjustOpen}
         onRedactPii={handleRedactPii}
         onCensorFaces={handleCensorFaces}
@@ -1056,6 +1066,7 @@ export function Editor({ params }: EditorProps) {
           onAdjustmentsChange={setAdjustments}
           onFlip={handleFlip}
           adjustOpen={adjustOpen}
+          backdropOpen={backdropOpen}
           imageWidth={cropRect ? Math.round(cropRect.w) : imageWidth}
           imageHeight={cropRect ? Math.round(cropRect.h) : imageHeight}
           resize={resize}

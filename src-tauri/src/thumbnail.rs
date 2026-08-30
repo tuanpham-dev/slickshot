@@ -17,11 +17,20 @@ const HEIGHT: u32 = 260;
 /// Gap from the monitor's bottom-right corner.
 const MARGIN: i32 = 24;
 
-/// The image the visible thumbnail is showing, so it can be released when
-/// the window closes by any route (its own button, the auto-dismiss timer,
-/// or a new capture replacing it).
+/// What the visible thumbnail is showing. Held so the image can be released
+/// when the window closes by any route (its own button, the auto-dismiss
+/// timer, or a new capture replacing it).
+pub struct ThumbnailState {
+    pub image_id: String,
+    /// Whether a timeout should keep this capture. Resolved once, when the
+    /// thumbnail opens, because a CLI `--auto-save` override applies to the
+    /// capture that asked for it and must survive until this window closes
+    /// -- long after `deliver_capture` has returned.
+    pub auto_save: bool,
+}
+
 #[derive(Default)]
-pub struct ThumbnailImage(pub Mutex<Option<String>>);
+pub struct ThumbnailImage(pub Mutex<Option<ThumbnailState>>);
 
 /// Actions the thumbnail's button row can take on the capture it's showing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
@@ -43,18 +52,21 @@ pub enum ThumbnailAction {
 /// `run_on_main_thread` dance for the same reason documented there (building
 /// a webview inline from inside the event loop's own dispatch deadlocks on
 /// Windows).
-pub async fn show(app: &AppHandle, image_id: &str, rect: PhysRect) -> CommandResult<()> {
+pub async fn show(
+    app: &AppHandle,
+    image_id: &str,
+    rect: PhysRect,
+    auto_save: bool,
+) -> CommandResult<()> {
     // Releasing the previous capture here (rather than when its window
     // closed) keeps back-to-back captures from leaking the earlier image.
-    let previous = app
-        .state::<ThumbnailImage>()
-        .0
-        .lock()
-        .unwrap()
-        .replace(image_id.to_string());
+    let previous = app.state::<ThumbnailImage>().0.lock().unwrap().replace(ThumbnailState {
+        image_id: image_id.to_string(),
+        auto_save,
+    });
     if let Some(old) = previous {
-        if old != image_id {
-            app.state::<ImageStore>().remove(&old);
+        if old.image_id != image_id {
+            app.state::<ImageStore>().remove(&old.image_id);
         }
     }
 
@@ -146,9 +158,9 @@ fn build_window(app: &AppHandle, url: &str, position: PhysicalPosition<i32>) -> 
 
 /// Drops the image the thumbnail was holding. Safe to call twice.
 fn release_current(app: &AppHandle) {
-    let id = app.state::<ThumbnailImage>().0.lock().unwrap().take();
-    if let Some(id) = id {
-        app.state::<ImageStore>().remove(&id);
+    let current = app.state::<ThumbnailImage>().0.lock().unwrap().take();
+    if let Some(current) = current {
+        app.state::<ImageStore>().remove(&current.image_id);
     }
 }
 
@@ -161,18 +173,37 @@ pub fn thumbnail_ready(app: AppHandle) {
     }
 }
 
-/// Hides the thumbnail and frees its image -- the auto-dismiss timeout, Esc,
-/// and every action that finishes with the capture all land here.
+/// Hides the thumbnail and frees its image.
+///
+/// `discard` separates the two ways a thumbnail goes away. Letting it time
+/// out means the user never said what to do with the capture, so auto-save
+/// keeps it; pressing Discard (or Esc) is an explicit "throw this away" and
+/// never writes a file. Actions that already did something with the image
+/// (copy, save, pin, edit, upload) pass `discard: true` so auto-save does
+/// not write a second, redundant copy.
 ///
 /// Hidden rather than closed so the next capture reuses the loaded webview
 /// instead of paying for a fresh page load, matching the editor/overlay
 /// prewarm approach.
 #[tauri::command]
-pub fn thumbnail_close(app: AppHandle) {
+pub fn thumbnail_close(app: AppHandle, discard: bool) -> CommandResult<()> {
+    if !discard {
+        let pending = {
+            let state = app.state::<ThumbnailImage>();
+            let held = state.0.lock().unwrap();
+            held.as_ref()
+                .filter(|s| s.auto_save)
+                .and_then(|s| app.state::<ImageStore>().get(&s.image_id))
+        };
+        if let Some(image) = pending {
+            crate::export::autosave_image(&app, &image)?;
+        }
+    }
     if let Some(window) = app.get_webview_window(LABEL) {
         let _ = window.hide();
     }
     release_current(&app);
+    Ok(())
 }
 
 #[tauri::command]
@@ -182,7 +213,8 @@ pub async fn thumbnail_action(app: AppHandle, action: ThumbnailAction) -> Comman
         .0
         .lock()
         .unwrap()
-        .clone()
+        .as_ref()
+        .map(|s| s.image_id.clone())
         .ok_or_else(|| CommandError::Image("the thumbnail is not showing a capture".into()))?;
     let image = app
         .state::<ImageStore>()
@@ -192,7 +224,7 @@ pub async fn thumbnail_action(app: AppHandle, action: ThumbnailAction) -> Comman
     match action {
         ThumbnailAction::Copy => {
             crate::export::copy_image_to_clipboard(image.as_ref().clone())?;
-            thumbnail_close(app);
+            thumbnail_close(app, true)?;
         }
         ThumbnailAction::Quicksave => {
             let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
@@ -203,7 +235,7 @@ pub async fn thumbnail_action(app: AppHandle, action: ThumbnailAction) -> Comman
             std::fs::write(&path, crate::images::encode_png(&image))
                 .map_err(|e| CommandError::Image(e.to_string()))?;
             crate::export::notify_saved(&app, &path.to_string_lossy());
-            thumbnail_close(app);
+            thumbnail_close(app, true)?;
         }
         ThumbnailAction::Pin => {
             // The pin takes over ownership of the image, so clear the
@@ -229,7 +261,7 @@ pub async fn thumbnail_action(app: AppHandle, action: ThumbnailAction) -> Comman
             // The URL is the only useful artifact of an upload, and the
             // thumbnail is about to close, so put it where it can be pasted.
             crate::export::copy_text_to_clipboard(result.url)?;
-            thumbnail_close(app);
+            thumbnail_close(app, true)?;
         }
     }
     Ok(())

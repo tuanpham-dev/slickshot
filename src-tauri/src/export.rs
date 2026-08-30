@@ -100,6 +100,25 @@ pub(crate) fn quicksave_file(settings: &crate::settings::Settings) -> std::path:
     dir.join(filename)
 }
 
+/// Writes `image` to the configured save folder under a timestamped name and
+/// notifies, returning the path. Shared by the quicksave export action, the
+/// quicksave capture mode, and the auto-save that keeps a capture nothing
+/// else would hold on to.
+pub(crate) fn autosave_image(
+    app: &tauri::AppHandle,
+    image: &image::RgbaImage,
+) -> CommandResult<std::path::PathBuf> {
+    let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+    let path = quicksave_file(&settings);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).map_err(|e| CommandError::Image(e.to_string()))?;
+    }
+    std::fs::write(&path, crate::images::encode_png(image))
+        .map_err(|e| CommandError::Image(e.to_string()))?;
+    notify_saved(app, &path.to_string_lossy());
+    Ok(path)
+}
+
 pub(crate) fn notify_saved(app: &tauri::AppHandle, path: &str) {
     let name = std::path::Path::new(path)
         .file_name()

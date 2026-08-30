@@ -44,8 +44,9 @@ interface PropertiesPanelProps {
   imageHeight: number;
   resize: { w: number; h: number } | null;
   onResizeChange: (size: { w: number; h: number } | null) => void;
-  /** Whether the Adjust panel section is expanded (toolbar toggle). */
+  /** Whether Adjust or Backdrop currently owns the panel (toolbar toggles). */
   adjustOpen: boolean;
+  backdropOpen: boolean;
   snapToText: boolean;
   onSnapToTextChange: (next: boolean) => void;
   /** Dims the snap toggle when no OCR engine is available to snap with. */
@@ -920,6 +921,7 @@ export function PropertiesPanel({
   onAdjustmentsChange,
   onFlip,
   adjustOpen,
+  backdropOpen,
   snapToText,
   onSnapToTextChange,
   ocrUnavailable,
@@ -928,9 +930,17 @@ export function PropertiesPanel({
   resize,
   onResizeChange,
 }: PropertiesPanelProps) {
-  // Adjust owns the whole panel while it is open. Showing it stacked under
-  // the active tool's own settings made the two read as one set of controls,
-  // so a tool's colour or size looked like part of the preset.
+  // Backdrop and Adjust each own the whole panel while open. Stacking either
+  // under the active tool's own settings made the two read as one set of
+  // controls, so a tool's colour or size looked like part of the frame.
+  if (backdropOpen && backdrop.enabled) {
+    return (
+      <div className="w-52 border-l border-[var(--border)] bg-[var(--surface)] p-3 flex flex-col gap-4 overflow-y-auto">
+        <BackdropFields backdrop={backdrop} onBackdropChange={onBackdropChange} />
+      </div>
+    );
+  }
+
   if (adjustOpen) {
     return (
       <div className="w-52 border-l border-[var(--border)] bg-[var(--surface)] p-3 flex flex-col gap-4 overflow-y-auto">

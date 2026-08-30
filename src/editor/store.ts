@@ -1,6 +1,6 @@
 import { create } from "zustand";
 import type { PhysRect } from "../lib/geometry";
-import type { Adjustments, Backdrop, MeasureLine, Shape, Style, ToolId } from "./types";
+import type { Adjustments, Backdrop, MeasureLine, PanelOverride, Shape, Style, ToolId } from "./types";
 import { IDENTITY_ADJUSTMENTS } from "./tools/adjust";
 import { cloneShape, mirrorShape, moveShape } from "./tools/select";
 import { renumberMarkers } from "./tools/marker";
@@ -30,11 +30,12 @@ interface EditorState {
   past: HistoryEntry[];
   future: HistoryEntry[];
   zoom: number;
-  /** Whether the Adjust panel has taken over the properties panel. Lives in
-   * the store rather than the Editor because every action that changes what
-   * the panel should show -- picking a tool, selecting a shape -- has to
-   * clear it, and doing that in one place is what keeps them consistent. */
-  adjustOpen: boolean;
+  /** Which document-level editor has taken over the properties panel, if
+   * any. One field rather than a flag each, so Adjust and Backdrop cannot
+   * both claim the panel. Lives in the store because every action that
+   * changes what the panel should show -- picking a tool, selecting a shape
+   * -- has to clear it, and doing that in one place keeps them consistent. */
+  panelOverride: PanelOverride;
   cropRect: PhysRect | null;
   ocrRect: PhysRect | null;
   measureLine: MeasureLine | null;
@@ -49,7 +50,7 @@ interface EditorState {
    * shape's coordinates. The caller replaces the base bitmap itself. */
   flipImage: (axis: "h" | "v") => void;
   setResize: (size: { w: number; h: number } | null) => void;
-  setAdjustOpen: (open: boolean) => void;
+  setPanelOverride: (override: PanelOverride) => void;
   setDraft: (shape: Shape | null) => void;
   commitDraft: () => void;
   addShape: (shape: Shape) => void;
@@ -131,7 +132,7 @@ export const useEditorStore = create<EditorState>((set, get) => ({
   past: [],
   future: [],
   zoom: 1,
-  adjustOpen: false,
+  panelOverride: null,
   cropRect: null,
   ocrRect: null,
   measureLine: null,
@@ -155,18 +156,19 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       ocrRect: null,
       measureLine: null,
       dirty: false,
-      adjustOpen: false,
+      panelOverride: null,
       backdrop: DEFAULT_BACKDROP,
       adjustments: IDENTITY_ADJUSTMENTS,
       resize: null,
     }),
-  setAdjustOpen: (open) => set({ adjustOpen: open }),
+  setPanelOverride: (override) => set({ panelOverride: override }),
 
   setTool: (tool) =>
     set((s) => ({
       tool,
-      // Picking a tool means wanting that tool's settings, so Adjust yields.
-      adjustOpen: false,
+      // Picking a tool means wanting that tool's settings, so whichever
+      // document-level editor holds the panel yields.
+      panelOverride: null,
       selectedId: tool === "select" ? s.selectedId : null,
       // The measurement is a read-out for the measure tool specifically;
       // leaving it drawn under another tool reads as a stray annotation.
@@ -252,10 +254,10 @@ export const useEditorStore = create<EditorState>((set, get) => ({
       dirty: true,
     })),
 
-  // Selecting a shape asks for that shape's properties, so Adjust yields --
-  // including when the same shape is clicked again, which a check on
-  // `selectedId` changing would miss.
-  select: (id) => set(id === null ? { selectedId: id } : { selectedId: id, adjustOpen: false }),
+  // Selecting a shape asks for that shape's properties, so the panel is
+  // handed back -- including when the same shape is clicked again, which a
+  // check on `selectedId` changing would miss.
+  select: (id) => set(id === null ? { selectedId: id } : { selectedId: id, panelOverride: null }),
 
   duplicateSelected: () => {
     const s = get();

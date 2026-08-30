@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
-import { Copy, Download, Pencil, Pin, Upload } from "lucide-react";
+import { Copy, Download, Pencil, Pin, Trash2, Upload } from "lucide-react";
 import {
   fetchShotImage,
   frontendMounted,
@@ -69,7 +69,8 @@ export function Thumbnail({ params }: ThumbnailProps) {
         // Nothing to preview means nothing to act on, so tear the window
         // down rather than leave an empty always-on-top box behind.
         console.error("thumbnail image load failed", err);
-        if (!stale) thumbnailClose();
+        // Nothing was decoded, so there is nothing worth saving.
+        if (!stale) thumbnailClose(true);
       });
     return () => {
       stale = true;
@@ -85,7 +86,9 @@ export function Thumbnail({ params }: ThumbnailProps) {
         const next = r - TICK_MS;
         if (next <= 0) {
           clearInterval(timer);
-          thumbnailClose();
+          // Timing out means the user never chose -- auto-save (when on)
+          // keeps the capture rather than silently dropping it.
+          thumbnailClose(false);
           return 0;
         }
         return next;
@@ -109,7 +112,7 @@ export function Thumbnail({ params }: ThumbnailProps) {
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
-      if (e.key === "Escape") thumbnailClose();
+      if (e.key === "Escape") thumbnailClose(true);
     }
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
@@ -145,6 +148,14 @@ export function Thumbnail({ params }: ThumbnailProps) {
             onClick={() => runAction(a.id)}
           />
         ))}
+        {/* The one way to throw a capture away on purpose. Everything else
+            here -- including letting the timer run out -- keeps it. */}
+        <IconButton
+          label="Discard"
+          icon={<Trash2 size={16} />}
+          disabled={busy}
+          onClick={() => thumbnailClose(true)}
+        />
       </div>
 
       {/* Dismissal countdown: a hairline rather than a number, so it reads as

@@ -173,41 +173,47 @@ describe("flipImage", () => {
   });
 });
 
-describe("adjustOpen", () => {
-  it("closes when a tool is picked, so the tool's own settings can show", () => {
+describe("panelOverride", () => {
+  it("clears when a tool is picked, so the tool's own settings can show", () => {
     useEditorStore.getState().setImage("img", 100, 100);
-    useEditorStore.getState().setAdjustOpen(true);
-    expect(useEditorStore.getState().adjustOpen).toBe(true);
+    useEditorStore.getState().setPanelOverride("adjust");
+    expect(useEditorStore.getState().panelOverride).toBe("adjust");
 
     useEditorStore.getState().setTool("rect");
-    expect(useEditorStore.getState().adjustOpen).toBe(false);
+    expect(useEditorStore.getState().panelOverride).toBeNull();
   });
 
-  it("closes when a shape is selected, including re-selecting the same one", () => {
+  it("clears when a shape is selected, including re-selecting the same one", () => {
     useEditorStore.getState().setImage("img", 100, 100);
     const shape = {
       id: "r", kind: "rect" as const, x: 0, y: 0, w: 10, h: 10, stroke: "#000", fill: null, strokeWidth: 1,
     };
     useEditorStore.getState().addShape(shape);
 
-    useEditorStore.getState().setAdjustOpen(true);
-    // Re-selecting the already-selected shape must still close it: a check
+    useEditorStore.getState().setPanelOverride("backdrop");
+    // Re-selecting the already-selected shape must still clear it: a check
     // on `selectedId` changing would miss this case.
     useEditorStore.getState().select("r");
-    expect(useEditorStore.getState().adjustOpen).toBe(false);
+    expect(useEditorStore.getState().panelOverride).toBeNull();
   });
 
-  it("stays open when the canvas is merely deselected", () => {
+  it("survives a bare deselect", () => {
     useEditorStore.getState().setImage("img", 100, 100);
-    useEditorStore.getState().setAdjustOpen(true);
+    useEditorStore.getState().setPanelOverride("adjust");
     useEditorStore.getState().select(null);
-    expect(useEditorStore.getState().adjustOpen).toBe(true);
+    expect(useEditorStore.getState().panelOverride).toBe("adjust");
+  });
+
+  it("holds only one editor at a time", () => {
+    useEditorStore.getState().setPanelOverride("adjust");
+    useEditorStore.getState().setPanelOverride("backdrop");
+    expect(useEditorStore.getState().panelOverride).toBe("backdrop");
   });
 
   it("resets when a new capture arrives", () => {
-    useEditorStore.getState().setAdjustOpen(true);
+    useEditorStore.getState().setPanelOverride("adjust");
     useEditorStore.getState().setImage("next", 100, 100);
-    expect(useEditorStore.getState().adjustOpen).toBe(false);
+    expect(useEditorStore.getState().panelOverride).toBeNull();
   });
 });
 

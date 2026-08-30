@@ -30,6 +30,7 @@ import {
 } from "../lib/ipc";
 import { IconButton } from "../ui/IconButton";
 import { Segmented } from "../ui/Segmented";
+import { Switch } from "../ui/Switch";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
 import { Settings } from "./Settings";
@@ -278,6 +279,13 @@ export function MainWindow() {
     }
   }
 
+  function handleAutoSaveChange(next: boolean) {
+    if (!settings) return;
+    const updated = { ...settings, auto_save: next };
+    setLocalSettings(updated);
+    setSettings(updated).catch(() => {});
+  }
+
   function shortcutFor(mode: CaptureMode): string {
     return settings?.hotkeys.find((h) => h.mode === mode)?.accelerator ?? "";
   }
@@ -452,6 +460,21 @@ export function MainWindow() {
               options={POST_CAPTURE_OPTIONS}
             />
           </div>
+
+          {/* Only meaningful for the two modes where nothing else would keep
+              the capture -- the editor holds on to it either way. */}
+          {postCapture !== "editor" && (
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-medium text-[var(--fg-muted)]">
+                {postCapture === "none" ? "Save automatically" : "Save if not dismissed"}
+              </span>
+              <Switch
+                aria-label="Save captures automatically"
+                checked={settings?.auto_save ?? true}
+                onChange={handleAutoSaveChange}
+              />
+            </div>
+          )}
         </div>
         {showScrollHint && (
           <div
