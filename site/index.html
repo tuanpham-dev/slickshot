@@ -980,6 +980,7 @@ tbody tr:last-child td { border-bottom: 0; }
   <symbol id="i-monitor" viewBox="0 0 24 24"><rect width="20" height="14" x="2" y="3" rx="2"/><line x1="8" x2="16" y1="21" y2="21"/><line x1="12" x2="12" y1="17" y2="21"/></symbol>
   <symbol id="i-languages" viewBox="0 0 24 24"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></symbol>
   <symbol id="i-scan-text" viewBox="0 0 24 24"><path d="M3 7V5a2 2 0 0 1 2-2h2"/><path d="M17 3h2a2 2 0 0 1 2 2v2"/><path d="M21 17v2a2 2 0 0 1-2 2h-2"/><path d="M7 21H5a2 2 0 0 1-2-2v-2"/><path d="M7 8h8"/><path d="M7 12h10"/><path d="M7 16h6"/></symbol>
+  <symbol id="i-scroll-text" viewBox="0 0 24 24"><path d="M15 12h-5"/><path d="M15 8h-5"/><path d="M19 17V5a2 2 0 0 0-2-2H4"/><path d="M8 21h12a2 2 0 0 0 2-2v-1a1 1 0 0 0-1-1H11a1 1 0 0 0-1 1v1a2 2 0 1 1-4 0V5a2 2 0 1 0-4 0v2a1 1 0 0 0 1 1h3"/></symbol>
   <symbol id="i-repeat" viewBox="0 0 24 24"><path d="m17 2 4 4-4 4"/><path d="M3 11v-1a4 4 0 0 1 4-4h14"/><path d="m7 22-4-4 4-4"/><path d="M21 13v1a4 4 0 0 1-4 4H3"/></symbol>
   <symbol id="i-pipette" viewBox="0 0 24 24"><path d="m2 22 1-1h3l9-9"/><path d="M3 21v-3l9-9"/><path d="m15 6 3.4-3.4a2.1 2.1 0 1 1 3 3L18 9l.4.4a2.1 2.1 0 1 1-3 3l-3.8-3.8a2.1 2.1 0 1 1 3-3l.4.4Z"/></symbol>
   <symbol id="i-ruler" viewBox="0 0 24 24"><path d="M21.3 15.3a2.4 2.4 0 0 1 0 3.4l-2.6 2.6a2.4 2.4 0 0 1-3.4 0L2.7 8.7a2.41 2.41 0 0 1 0-3.4l2.6-2.6a2.41 2.41 0 0 1 3.4 0Z"/><path d="m14.5 12.5 2-2"/><path d="m11.5 9.5 2-2"/><path d="m8.5 6.5 2-2"/><path d="m17.5 15.5 2-2"/></symbol>
@@ -1099,13 +1100,13 @@ tbody tr:last-child td { border-bottom: 0; }
   <div class="wrap">
     <div class="sec-head">
       <span class="eyebrow">capture</span>
-      <h2>Eight ways to grab the screen.</h2>
-      <p class="lede">Every mode is one tile in a 480&times;640 window, or one global hotkey away with the window never opening at all. Region selection can span monitors, and handles per-monitor scaling instead of assuming one desktop scale factor.</p>
+      <h2>Nine ways to grab the screen.</h2>
+      <p class="lede">Every mode is one tile in a single small window, or one global hotkey away with the window never opening at all. Region selection can span monitors, and handles per-monitor scaling instead of assuming one desktop scale factor.</p>
     </div>
 
     <div class="capture-layout">
       <!-- main window recreation -->
-      <div class="frame appwin" role="img" aria-label="The SlickShot main window: a grid of capture-mode tiles, a delay selector, and the save folder.">
+      <div class="frame appwin" role="img" aria-label="The SlickShot main window: a grid of capture-mode tiles, a delay selector, and the post-capture behaviour.">
         <div class="frame-bar" aria-hidden="true">
           <span class="dot"></span><span class="dot"></span><span class="dot"></span>
           <span class="frame-title">SlickShot</span>
@@ -1120,22 +1121,22 @@ tbody tr:last-child td { border-bottom: 0; }
           </div>
           <div class="tiles">
             <div class="tile"><svg class="ic ic-lg"><use href="#i-camera"/></svg><b>Region</b><span class="key">PrintScreen</span></div>
-            <div class="tile"><svg class="ic ic-lg"><use href="#i-maximize"/></svg><b>Screen</b><span class="key">Shift+PrintScreen</span></div>
             <div class="tile"><svg class="ic ic-lg"><use href="#i-app-window"/></svg><b>Window</b><span class="key">Ctrl+PrintScreen</span></div>
             <div class="tile"><svg class="ic ic-lg"><use href="#i-monitor"/></svg><b>Monitor</b><span class="key">Pick&hellip;</span></div>
-            <div class="tile tile-wide"><svg class="ic"><use href="#i-languages"/></svg><b>Translate/Extract text</b><span class="key">Ctrl+Shift+PrintScreen</span></div>
-            <div class="tile tile-half"><svg class="ic"><use href="#i-repeat"/></svg><b>Repeat region</b></div>
+            <div class="tile"><svg class="ic ic-lg"><use href="#i-maximize"/></svg><b>Screen</b><span class="key">Shift+PrintScreen</span></div>
+            <div class="tile tile-wide"><svg class="ic"><use href="#i-scroll-text"/></svg><b>Scrolling capture</b></div>
+            <div class="tile tile-wide"><svg class="ic"><use href="#i-languages"/></svg><b>Extract text</b><span class="key">Ctrl+Shift+PrintScreen</span></div>
             <div class="tile tile-half"><svg class="ic"><use href="#i-pipette"/></svg><b>Pick color</b></div>
-            <div class="tile tile-wide"><svg class="ic"><use href="#i-ruler"/></svg><b>Measure</b></div>
+            <div class="tile tile-half"><svg class="ic"><use href="#i-ruler"/></svg><b>Measure</b></div>
           </div>
           <div class="tile tile-wide" style="grid-column:auto"><svg class="ic"><use href="#i-image"/></svg><b>Open image&hellip;</b><span class="key">Ctrl+O</span></div>
           <div style="display:flex;align-items:center;justify-content:space-between">
             <span style="font-size:12px;color:var(--fg-muted);font-weight:500">Delay</span>
-            <span class="seg"><span>Off</span><span class="on">3s</span><span>5s</span><span>10s</span></span>
+            <span class="seg"><span class="on">Off</span><span>3s</span><span>5s</span><span>10s</span></span>
           </div>
-          <div class="appwin-foot">
-            <span>Saves to <code>~/Pictures/Screenshots</code></span>
-            <span style="color:var(--accent)">Change</span>
+          <div style="display:flex;align-items:center;justify-content:space-between">
+            <span style="font-size:12px;color:var(--fg-muted);font-weight:500">After capture</span>
+            <span class="seg"><span class="on">Editor</span><span>Thumbnail</span><span>Nothing</span></span>
           </div>
         </div>
       </div>
@@ -1154,6 +1155,13 @@ tbody tr:last-child td { border-bottom: 0; }
           <div>
             <h3>Screen, monitor, window <kbd>Shift/Ctrl+PrintScreen</kbd></h3>
             <p>The whole virtual desktop, one monitor picked by name and resolution, or a single window - each straight to the editor.</p>
+          </div>
+        </div>
+        <div class="mode">
+          <span class="mode-ic"><svg class="ic"><use href="#i-scroll-text"/></svg></span>
+          <div>
+            <h3>Scrolling capture</h3>
+            <p>Pick a region or a window and let it scroll itself, one tall screenshot out the other end. Each frame is matched against the last by measuring how far the content really moved, so a page that pins a nav bar half way down, or lazily loads as it goes, still lines up. A draggable pill counts the height as it grows; stop early or let it end at the bottom on its own.</p>
           </div>
         </div>
         <div class="mode">
@@ -1462,6 +1470,11 @@ tbody tr:last-child td { border-bottom: 0; }
         <p>Imgur, any S3-compatible bucket, or catbox.moe. Every upload is logged locally with its link, and providers that support deletion get a one-click delete right from the history.</p>
       </div>
       <div class="card">
+        <svg class="ic ic-lg" aria-hidden="true"><use href="#i-history"/></svg>
+        <h3>Capture history</h3>
+        <p>Anything you save to disk is kept and browsable, next to the upload log. An entry holds its annotations separately from the image, so reopening one hands the shapes back editable rather than baked in - and saving again updates that same entry instead of stacking duplicates. Opt out in Settings; Clear takes the files with it.</p>
+      </div>
+      <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-pin"/></svg>
         <h3>Pin to screen</h3>
         <p>Float the capture as an always-on-top window: drag to move, scroll to resize, <kbd>Esc</kbd> to close. For holding a design over the thing you're building.</p>
@@ -1469,7 +1482,7 @@ tbody tr:last-child td { border-bottom: 0; }
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-keyboard"/></svg>
         <h3>Tray and hotkeys</h3>
-        <p>Lives in the tray with global hotkeys for every capture mode. All of them are rebindable in Settings - including the three that ship unbound.</p>
+        <p>Lives in the tray with global hotkeys for every capture mode, and a menu that mirrors the main window down to the monitor picker. All of them are rebindable in Settings - including the ones that ship unbound.</p>
       </div>
       <div class="card">
         <svg class="ic ic-lg" aria-hidden="true"><use href="#i-image"/></svg>
@@ -1491,7 +1504,7 @@ tbody tr:last-child td { border-bottom: 0; }
     <div class="sec-head">
       <span class="eyebrow">cli</span>
       <h2>The same binary, without the window.</h2>
-      <p class="lede">Non-interactive commands run headless - no window ever opens, and they work whether or not the app is already running. <code>region</code>, <code>window</code> and <code>open</code> forward to a running instance, or launch one.</p>
+      <p class="lede">Non-interactive commands run headless - no window ever opens, and they work whether or not the app is already running. <code>region</code>, <code>scroll</code>, <code>window</code> and <code>open</code> forward to a running instance, or launch one.</p>
     </div>
 
     <div class="frame term">
@@ -1526,6 +1539,7 @@ tbody tr:last-child td { border-bottom: 0; }
             <tr><td><code>slickshot monitor &lt;index&gt;</code></td><td>Capture one monitor by index, headless.</td></tr>
             <tr><td><code>slickshot window --title &lt;text&gt;</code></td><td>Capture the first window whose title matches. Without the flag, opens the interactive picker.</td></tr>
             <tr><td><code>slickshot region</code></td><td>Interactive region selection. Add <code>--edit</code> to land in the editor.</td></tr>
+            <tr><td><code>slickshot scroll</code></td><td>Pick a region, then auto-scroll and stitch it into one long screenshot.</td></tr>
             <tr><td><code>slickshot open &lt;file&gt;</code></td><td>Open an existing image in the annotation editor.</td></tr>
             <tr><td><code>slickshot ocr &lt;file&gt;</code></td><td>Extract text and print it to stdout. <code>--lang</code> picks the recognition language, e.g. <code>deu</code>.</td></tr>
             <tr><td><code>slickshot qr &lt;file&gt;</code></td><td>Decode QR codes, one payload per line.</td></tr>

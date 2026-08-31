@@ -6,7 +6,8 @@ A multi-platform screenshot capture and annotation tool built with Tauri 2 + Rea
 
 ## Features
 
-- **Capture modes:** region (drag-select, can span monitors), full screen, single monitor, window, repeat last region, region straight to a file (skipping the editor), pick a color off the screen, measure a distance, and translate/extract text from a dragged region
+- **Capture modes:** region (drag-select, can span monitors), full screen, single monitor, window, scrolling capture, repeat last region, region straight to a file (skipping the editor), pick a color off the screen, measure a distance, and translate/extract text from a dragged region
+- **Scrolling capture:** pick a region or a window, and SlickShot scrolls the content under it and stitches the frames into one tall screenshot. A draggable pill shows the height as it grows, with Done to keep what it has and Cancel to throw it away. The stitcher measures each real scroll offset rather than trusting the wheel, tolerates furniture that pins itself part-way down (a sticky nav bar), and stops on its own at the bottom of the page
 - **Region selection helpers:** lock the drag to a 1:1 / 4:3 / 16:9 / 9:16 aspect, type exact pixel dimensions, and snap edges to nearby window borders (hold `Alt` to bypass)
 - **Delay:** off / 3s / 5s / 10s / 30s
 - **After a capture:** open the editor, show a floating thumbnail with Copy / Save / Pin / Edit / Upload and an auto-dismiss timer, or do nothing -- and optionally copy to the clipboard either way
@@ -17,9 +18,10 @@ A multi-platform screenshot capture and annotation tool built with Tauri 2 + Rea
 - **Text extraction:** drag a region to OCR it (native **Vision** on macOS, native **Windows.Media.Ocr** on Windows, **Tesseract** on Linux), decode any QR codes in the same region, and optionally translate the result -- from the toolbar's Extract-text tool, the main window's Translate/Extract-text mode, or the CLI's `ocr`/`qr` commands. The highlighter can also snap to OCR'd text lines.
 - **Export:** copy to clipboard, Save As (PNG / JPEG / WebP / AVIF), Quick save to a configured folder, or upload to Imgur / imgbb / Google Drive / an S3-compatible bucket / catbox.moe (with local upload history and one-click delete for providers that support it); export size can be scaled to 100/75/50/33%
 - **Pin to screen:** float a region as an always-on-top window -- drag to move, scroll to resize, Esc to close -- for comparing a capture against what's underneath it
+- **Capture history:** every capture you save to disk is kept and browsable, alongside the upload history. Entries store the annotations separately from the image, so reopening one puts the shapes back editable rather than baked in, and saving again updates that entry instead of piling up duplicates. Opt out in Settings, and Clear removes the files, not just the list
 - **Open existing images** for annotation
 - **CLI** -- capture, OCR, decode QR, and upload from the terminal; see [docs/CLI.md](docs/CLI.md)
-- **Tray icon + global hotkeys**, all rebindable in Settings > Shortcuts (default: `PrintScreen` region, `Shift+PrintScreen` screen, `Ctrl+PrintScreen` window, `Ctrl+Shift+PrintScreen` translate/extract text; repeat-region, region-to-file, pick-color, and measure are unbound by default)
+- **Tray icon + global hotkeys**, all rebindable in Settings > Shortcuts (default: `PrintScreen` region, `Shift+PrintScreen` screen, `Ctrl+PrintScreen` window, `Ctrl+Shift+PrintScreen` translate/extract text; scrolling capture, repeat-region, region-to-file, pick-color, and measure are unbound by default). The tray menu mirrors the main window: every capture mode, a monitor submenu, the delay, capture history and Settings
 - **Auto-updates** on Windows, macOS and the AppImage (the `.deb`/`.rpm`/AUR packages are updated by your package manager); see [Building](docs/BUILDING.md)
 - **Settings** persisted across restarts: shortcuts, save folder, output format/quality/scale, post-capture behavior, theme, translation target language, OCR language, upload provider and credentials, update checks
 
@@ -70,6 +72,7 @@ Bundles land in `src-tauri/target/release/bundle/` (`deb/`, `rpm/`, `appimage/`)
 
 ## Known limitations
 
+- **Scrolling capture drives the mouse wheel**, so it needs an input-synthesis backend: XTest on X11 (live-tested), `SendInput` on Windows and `CGEvent` on macOS (both compile-verified only so far). It cannot work on Wayland for the same reason capture cannot.
 - **Wayland is not implemented.** The `ScreenCapturer` trait is the seam for a future `PortalCapturer` (xdg-desktop-portal) backend; the app currently only has an X11 implementation.
 - **Ctrl+S in the editor** appears to be intercepted by a native WebKitGTK/GTK accelerator before it reaches the page's JavaScript — pressing it does nothing on Linux. Save As and Quick save both work correctly via the toolbar/menu; only the keyboard shortcut is affected, and only on Linux — it works on Windows.
 - **macOS** builds and runs on Apple Silicon (dev build and the CI-built release bundle both verified); core capture/editor/settings functionality has been exercised, though it hasn't had the same systematic pass as the [Windows test plan](docs/TESTING.md).
