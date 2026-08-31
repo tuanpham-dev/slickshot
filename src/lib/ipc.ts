@@ -11,7 +11,8 @@ export type CaptureMode =
   | "translate"
   | "color"
   | "measure"
-  | "region_quicksave";
+  | "region_quicksave"
+  | "scroll";
 
 export interface MonitorInfo {
   id: number;
@@ -108,10 +109,16 @@ export function onOpenSettings(cb: () => void): Promise<UnlistenFn> {
   return listen<void>("open_settings", () => cb());
 }
 
+export function onOpenHistory(cb: () => void): Promise<UnlistenFn> {
+  return listen<void>("open_history", () => cb());
+}
+
 export type ExportAction =
   | { kind: "clipboard" }
-  | { kind: "save"; path: string }
-  | { kind: "quicksave" };
+  /** `shapes` is the annotation list as JSON, so capture history can store the
+   * base image and its shapes separately and reopen the entry editable. */
+  | { kind: "save"; path: string; shapes?: string }
+  | { kind: "quicksave"; shapes?: string };
 
 export interface ExportResult {
   saved_path: string | null;
@@ -162,6 +169,9 @@ export interface AppSettings {
   s3_key_prefix: string;
   s3_public_base: string;
   auto_check_updates: boolean;
+  /** Index saved captures so they can be reopened with their annotations
+   * still editable. Only captures written to disk are recorded. */
+  capture_history: boolean;
   /** Tool ids the capture overlay's quick-tools bar offers, in bar order. */
   overlay_tools: string[];
 }
@@ -453,6 +463,49 @@ export const selectionConfirmToEditor = (shapesJson: string) =>
 /** Drains the shapes an overlay parked for this editor session; "" when the
  * capture arrived without annotations. */
 export const takePendingShapes = () => call<string>("take_pending_shapes");
+
+/** One saved capture in the local history. `saved_path` is the user's own
+ * copy (for "Show in folder"); the entry keeps its own base image, so
+ * reopening works even if that file has since moved. */
+export interface HistoryEntry {
+  id: string;
+  saved_path: string;
+  width: number;
+  height: number;
+  has_shapes: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+export const historyList = () => call<HistoryEntry[]>("history_list");
+export const historyCopy = (id: string) => call<void>("history_copy", { id });
+export const historyDelete = (id: string) => call<void>("history_delete", { id });
+export const historyClear = () => call<void>("history_clear");
+export const historyOpenInEditor = (id: string) =>
+  call<void>("history_open_in_editor", { id });
+
+/** Thumbnail bytes for one entry, as an object URL the caller must revoke.
+ * These live on disk rather than in the image store, so they come through a
+ * command instead of the `slickshot://` protocol. */
+export async function historyThumbUrl(id: string): Promise<string> {
+  const bytes = await call<number[]>("history_thumb", { id });
+  return URL.createObjectURL(new Blob([new Uint8Array(bytes)], { type: "image/png" }));
+}
+
+/** Live progress from a scrolling capture: how tall the stitched result is
+ * so far, and how many frames went into it. */
+export interface ScrollProgress {
+  height: number;
+  frames: number;
+}
+
+export const scrollStart = (rect: PhysRect) => call<void>("scroll_start", { rect });
+export const scrollStop = () => call<void>("scroll_stop");
+export const scrollCancel = () => call<void>("scroll_cancel");
+
+export function onScrollProgress(cb: (p: ScrollProgress) => void): Promise<UnlistenFn> {
+  return listen<ScrollProgress>("scroll:progress", (e) => cb(e.payload));
+}
 
 export function parseHashRoute(): { route: string; params: URLSearchParams } {
   const hash = window.location.hash.replace(/^#/, "");

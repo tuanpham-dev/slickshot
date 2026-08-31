@@ -12,6 +12,8 @@ import {
   ScanText,
   Pipette,
   Ruler,
+  ArrowLeft,
+  ScrollText,
   History as HistoryIcon,
 } from "lucide-react";
 import {
@@ -20,6 +22,7 @@ import {
   listMonitors,
   getSettings,
   setSettings,
+  onOpenHistory,
   onOpenSettings,
   ocrEngineStatus,
   type AppSettings,
@@ -30,10 +33,10 @@ import {
 import { IconButton } from "../ui/IconButton";
 import { Segmented } from "../ui/Segmented";
 import { Switch } from "../ui/Switch";
-import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
 import { Settings } from "./Settings";
 import { UploadHistory } from "./UploadHistory";
+import { CaptureHistory } from "./CaptureHistory";
 import { OcrMissingDialog } from "../ui/OcrMissingDialog";
 
 type DelayOption = "0" | "3000" | "5000" | "10000" | "30000";
@@ -101,8 +104,12 @@ function ModeTile({ icon, label, shortcut, onClick, disabled, compact, warning }
       onClick={onClick}
       disabled={disabled}
       className={[
-        "w-full flex flex-col items-center justify-center gap-2 rounded-[var(--radius-lg)]",
-        "border border-[var(--border)] bg-[var(--surface)] py-4",
+        // Sized so the whole window fits without scrolling: these four are
+        // the only tall tiles, and the padding they used pushed the save
+        // folder footer below the fold. `MonitorTile` carries the same
+        // values -- they sit in one grid and have to match.
+        "w-full flex flex-col items-center justify-center gap-1 rounded-[var(--radius-lg)]",
+        "border border-[var(--border)] bg-[var(--surface)] py-2",
         "hover:bg-[var(--surface-hover)] hover:border-[var(--border-strong)]",
         "transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)]",
         "focus-visible:shadow-[var(--focus-ring)] disabled:opacity-50 disabled:cursor-not-allowed",
@@ -137,8 +144,8 @@ function MonitorTile({ disabled, busy, onPick }: { disabled?: boolean; busy: boo
           type="button"
           disabled={disabled}
           className={[
-            "flex flex-col items-center justify-center gap-2 rounded-[var(--radius-lg)]",
-            "border border-[var(--border)] bg-[var(--surface)] py-4",
+            "flex flex-col items-center justify-center gap-1 rounded-[var(--radius-lg)]",
+            "border border-[var(--border)] bg-[var(--surface)] py-2",
             "hover:bg-[var(--surface-hover)] hover:border-[var(--border-strong)]",
             "transition-colors duration-[var(--duration-fast)] ease-[var(--ease-out)]",
             "focus-visible:shadow-[var(--focus-ring)] disabled:opacity-50 disabled:cursor-not-allowed",
@@ -192,6 +199,9 @@ export function MainWindow() {
   const [settings, setLocalSettings] = useState<AppSettings | null>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  // Captures first: the local gallery is the one you reach for most, and
+  // uploads are a subset of what you have already captured.
+  const [historyTab, setHistoryTab] = useState<"captures" | "uploads">("captures");
   const [busy, setBusy] = useState(false);
   const [ocrStatus, setOcrStatus] = useState<OcrEngineStatus | null>(null);
   const [ocrMissingOpen, setOcrMissingOpen] = useState(false);
@@ -257,6 +267,18 @@ export function MainWindow() {
     const unlisten = onOpenSettings(() => setSettingsOpen(true));
     return () => {
       unlisten.then((f) => f());
+    };
+  }, []);
+
+  // The tray's "Capture history" opens the window on the history view rather
+  // than wherever it was last left.
+  useEffect(() => {
+    const unlisten = onOpenHistory(() => {
+      setHistoryOpen(true);
+      setHistoryTab("captures");
+    });
+    return () => {
+      unlisten.then((fn) => fn());
     };
   }, []);
 
@@ -344,7 +366,32 @@ export function MainWindow() {
   }
 
   if (historyOpen) {
-    return <UploadHistory onBack={() => setHistoryOpen(false)} />;
+    return (
+      <div className="flex flex-col h-full min-h-0 bg-[var(--bg)]">
+        <div className="flex items-center gap-2 px-4 pt-4 pb-2">
+          <IconButton
+            label="Back"
+            icon={<ArrowLeft size={16} />}
+            onClick={() => setHistoryOpen(false)}
+          />
+          <h1 className="text-sm font-semibold text-[var(--fg)]">History</h1>
+        </div>
+        <div className="px-4 pb-1">
+          <Segmented
+            fullWidth
+            size="sm"
+            aria-label="History kind"
+            value={historyTab}
+            onChange={setHistoryTab}
+            options={[
+              { value: "captures", label: "Captures" },
+              { value: "uploads", label: "Uploads" },
+            ]}
+          />
+        </div>
+        {historyTab === "captures" ? <CaptureHistory /> : <UploadHistory />}
+      </div>
+    );
   }
 
   return (
@@ -369,7 +416,10 @@ export function MainWindow() {
         <div
           ref={scrollRef}
           onScroll={updateScrollHint}
-          className="h-full overflow-y-auto px-4 flex flex-col gap-4"
+          // `pb-4`: the list runs to the window's bottom edge now that the
+          // save-folder footer is gone, and the window is sized to fit it --
+          // without this the last row sits flush against the frame.
+          className="h-full overflow-y-auto px-4 pb-4 flex flex-col gap-3"
         >
           <div className="grid grid-cols-2 gap-3">
             <ModeTile
@@ -380,13 +430,6 @@ export function MainWindow() {
               disabled={busy}
             />
             <ModeTile
-              icon={<Maximize size={22} />}
-              label="Screen"
-              shortcut={shortcutFor("screen")}
-              onClick={() => trigger("screen")}
-              disabled={busy}
-            />
-            <ModeTile
               icon={<AppWindow size={22} />}
               label="Window"
               shortcut={shortcutFor("window")}
@@ -394,6 +437,23 @@ export function MainWindow() {
               disabled={busy}
             />
             <MonitorTile busy={busy} onPick={(id) => trigger("monitor", id)} />
+            <ModeTile
+              icon={<Maximize size={22} />}
+              label="Screen"
+              shortcut={shortcutFor("screen")}
+              onClick={() => trigger("screen")}
+              disabled={busy}
+            />
+            <div className="col-span-2">
+              <ModeTile
+                compact
+                icon={<ScrollText size={18} />}
+                label="Scrolling capture"
+                shortcut={shortcutFor("scroll")}
+                onClick={() => trigger("scroll")}
+                disabled={busy}
+              />
+            </div>
             <div className="col-span-2">
               <ModeTile
                 compact
@@ -454,8 +514,10 @@ export function MainWindow() {
           </div>
 
           {/* Only meaningful for the two modes where nothing else would keep
-              the capture -- the editor holds on to it either way. */}
-          {postCapture !== "editor" && (
+              the capture. The editor holds on to it either way, so rather
+              than dropping the row and leaving a gap under "After capture",
+              that case says why there is nothing to decide. */}
+          {postCapture !== "editor" ? (
             <div className="flex items-center justify-between">
               <span className="text-xs font-medium text-[var(--fg-muted)]">
                 {postCapture === "none" ? "Save automatically" : "Save if not dismissed"}
@@ -466,6 +528,10 @@ export function MainWindow() {
                 onChange={handleAutoSaveChange}
               />
             </div>
+          ) : (
+            <p className="text-xs text-[var(--fg-subtle)]">
+              The editor keeps each capture until you save or discard it.
+            </p>
           )}
         </div>
         {showScrollHint && (
@@ -474,15 +540,6 @@ export function MainWindow() {
             className="pointer-events-none absolute inset-x-0 bottom-0 h-8 bg-gradient-to-t from-[var(--bg)] to-transparent"
           />
         )}
-      </div>
-
-      <div className="px-4 pb-4 pt-2">
-        <div className="flex items-center justify-between text-[11px] text-[var(--fg-muted)] border-t border-[var(--border)] pt-3">
-          <span>Saves to {settings?.save_dir ?? "~/Pictures/Screenshots"}</span>
-          <Button variant="ghost" size="sm" onClick={() => setSettingsOpen(true)}>
-            Change
-          </Button>
-        </div>
       </div>
 
       {ocrStatus && !ocrStatus.available && ocrStatus.install_hint && (

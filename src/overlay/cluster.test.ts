@@ -101,6 +101,19 @@ describe("placeCluster", () => {
     });
   }
 
+  // The hint bar is centred inside the bottom edge, so a cluster forced to
+  // the same band has to move aside or it lands on top of the text.
+  it("right-aligns when a full-screen selection pins it inside the bottom edge", () => {
+    const p = placeCluster(frac(0, 0, 1, 1), container, size, "below");
+    expect(p.left).toBe(container.w - MARGIN - size.w / 2);
+    expect(onScreen(p)).toBe(true);
+  });
+
+  it("still centres when there is room outside the selection", () => {
+    const p = placeCluster(frac(0.3, 0.1, 0.7, 0.4), container, size, "below");
+    expect(p.left).toBe(500);
+  });
+
   it("leaves a non-colliding placement untouched", () => {
     const sel = frac(0.3, 0.3, 0.7, 0.6);
     const plain = placeCluster(sel, container, size, "below");

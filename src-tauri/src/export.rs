@@ -10,8 +10,18 @@ use crate::commands::{CommandError, CommandResult};
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ExportAction {
     Clipboard,
-    Save { path: String },
-    Quicksave,
+    /// `shapes` carries the editor's annotation list so history can store the
+    /// base image and the shapes separately, and reopen the entry editable.
+    /// Optional and defaulted so an older frontend payload still parses.
+    Save {
+        path: String,
+        #[serde(default)]
+        shapes: Option<String>,
+    },
+    Quicksave {
+        #[serde(default)]
+        shapes: Option<String>,
+    },
 }
 
 #[derive(Default)]
@@ -59,13 +69,14 @@ pub fn export_commit(
             copy_image_to_clipboard(img)?;
             Ok(ExportResult { saved_path: None })
         }
-        ExportAction::Save { path } => {
+        ExportAction::Save { path, shapes } => {
             let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
             save_encoded(&bytes, &path, Some(settings.avif_quality))?;
             notify_saved(&app, &path);
+            crate::history::record_editor_save(&app, shapes.as_deref(), &path);
             Ok(ExportResult { saved_path: Some(path) })
         }
-        ExportAction::Quicksave => {
+        ExportAction::Quicksave { shapes } => {
             let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
             let path = quicksave_file(&settings);
             if let Some(dir) = path.parent() {
@@ -74,6 +85,7 @@ pub fn export_commit(
             std::fs::write(&path, &bytes).map_err(|e| CommandError::Image(e.to_string()))?;
             let saved_path = path.to_string_lossy().into_owned();
             notify_saved(&app, &saved_path);
+            crate::history::record_editor_save(&app, shapes.as_deref(), &saved_path);
             Ok(ExportResult {
                 saved_path: Some(saved_path),
             })
@@ -116,6 +128,10 @@ pub(crate) fn autosave_image(
     std::fs::write(&path, crate::images::encode_png(image))
         .map_err(|e| CommandError::Image(e.to_string()))?;
     notify_saved(app, &path.to_string_lossy());
+    // Central for every shape-less writer that lands here: the overlay's Save
+    // button, the quicksave capture mode, and the auto-save that keeps a
+    // capture nothing else would.
+    crate::history::record_saved_file(app, image, &path.to_string_lossy());
     Ok(path)
 }
 
@@ -129,6 +145,18 @@ pub(crate) fn notify_saved(app: &tauri::AppHandle, path: &str) {
         .builder()
         .title("Screenshot saved")
         .body(name)
+        .show();
+}
+
+/// Tells the user a capture failed. A scrolling capture has no window left to
+/// show an error in by the time it can fail, so without this the capture just
+/// stops and nothing says why.
+pub(crate) fn notify_failed(app: &tauri::AppHandle, what: &str, why: &str) {
+    let _ = app
+        .notification()
+        .builder()
+        .title(what)
+        .body(why)
         .show();
 }
 

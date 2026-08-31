@@ -707,7 +707,11 @@ export function Canvas({
   // key off the image, which hadn't changed, so nothing ever repainted them.
   return (
     <div
-      className="shrink-0"
+      // `m-auto` centres this in the scrolling canvas area while it fits, and
+      // resolves to zero once it does not -- which is what keeps the image's
+      // top-left reachable when zoomed past the viewport. See the comment on
+      // that container in `Editor.tsx`.
+      className="shrink-0 m-auto"
       style={
         backdrop.enabled
           ? {

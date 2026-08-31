@@ -39,7 +39,9 @@ function Thumbnail({ url }: { url: string }) {
   );
 }
 
-export function UploadHistory({ onBack }: { onBack: () => void }) {
+/** Body only when `onBack` is omitted: the history view owns the header and
+ * the Captures/Uploads tabs, and renders this underneath them. */
+export function UploadHistory({ onBack }: { onBack?: () => void }) {
   const [entries, setEntries] = useState<UploadEntry[] | null>(null);
   const [clearOpen, setClearOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<UploadEntry | null>(null);
@@ -83,11 +85,13 @@ export function UploadHistory({ onBack }: { onBack: () => void }) {
   }
 
   return (
-    <div className="flex flex-col h-full bg-[var(--bg)]">
-      <div className="flex items-center gap-2 px-4 pt-4 pb-2">
-        <IconButton label="Back" icon={<ArrowLeft size={16} />} onClick={onBack} />
-        <h1 className="text-sm font-semibold text-[var(--fg)]">Uploads</h1>
-      </div>
+    <div className="flex flex-col h-full min-h-0 bg-[var(--bg)]">
+      {onBack && (
+        <div className="flex items-center gap-2 px-4 pt-4 pb-2">
+          <IconButton label="Back" icon={<ArrowLeft size={16} />} onClick={onBack} />
+          <h1 className="text-sm font-semibold text-[var(--fg)]">Uploads</h1>
+        </div>
+      )}
 
       <div className="flex-1 min-h-0 overflow-y-auto px-4 py-2">
         {entries === null ? (

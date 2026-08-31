@@ -12,6 +12,7 @@ import {
   onSelectionChanged,
   onOverlayShapes,
   overlaySetShapes,
+  scrollStart,
   releaseImage,
   selectionSetDest,
   selectionRegionImage,
@@ -88,7 +89,7 @@ interface OverlayProps {
 
 interface OverlayFrame {
   image_id: string;
-  mode: "region" | "window" | "translate" | "color" | "measure";
+  mode: "region" | "scroll" | "window" | "translate" | "color" | "measure";
   /** Previous capture's region, already clipped to the current screen by
    * Rust. Present only for region mode, and only when there is one. */
   seed_rect: PhysRect | null;
@@ -164,6 +165,10 @@ export function Overlay({ params }: OverlayProps) {
   const [frame, setFrame] = useState<OverlayFrame | null>(null);
   const [selection, setSelection] = useState<PhysRect | null>(null);
   const [windows, setWindows] = useState<WindowInfo[]>([]);
+  /** Set when starting a scrolling capture failed. Shown in place of the
+   * hint, because otherwise the overlay just reappears at the picker and the
+   * confirm looks like it was ignored. */
+  const [startError, setStartError] = useState<string | null>(null);
   const [hoveredWindow, setHoveredWindow] = useState<WindowInfo | null>(null);
   const [imgLoaded, setImgLoaded] = useState(false);
 
@@ -252,7 +257,10 @@ export function Overlay({ params }: OverlayProps) {
   const translateMode = frame?.mode === "translate";
   const colorMode = frame?.mode === "color";
   const measureMode = frame?.mode === "measure";
-  const regionMode = frame?.mode === "region";
+  const scrollMode = frame?.mode === "scroll";
+  // Scroll mode is a region selection in every respect except what confirm
+  // does with it, so it shares the selection gestures and edge snapping.
+  const regionMode = frame?.mode === "region" || scrollMode;
 
   const scheduleCursor = useCallback((next: CursorState | null) => {
     pendingCursorRef.current = next;
@@ -324,7 +332,13 @@ export function Overlay({ params }: OverlayProps) {
         if (e.payload.seed_rect) selectionSetRect(e.payload.seed_rect);
         // Region mode loads them too: hovering a window there highlights it
         // and a click (rather than a drag) snaps the selection to its bounds.
-        if (e.payload.mode === "window" || e.payload.mode === "region") {
+        // Scroll mode needs them too: it highlights windows on hover so a
+        // whole window can be picked without dragging a region.
+        if (
+          e.payload.mode === "window" ||
+          e.payload.mode === "region" ||
+          e.payload.mode === "scroll"
+        ) {
           listWindows().then(setWindows);
         }
         if (e.payload.mode === "region") {
@@ -858,7 +872,11 @@ export function Overlay({ params }: OverlayProps) {
     // and no snap would happen anyway -- highlighting there would promise
     // something the click doesn't do.
     if (!mode && regionMode) {
-      const canSnap = e.ctrlKey && !(selection && rectContains(selection, p));
+      // Scrolling capture is usually aimed at a whole window, so it
+      // highlights them on hover; plain region mode still asks for Ctrl so an
+      // ordinary drag cannot jump to a window by accident.
+      const canSnap =
+        (scrollMode || e.ctrlKey) && !(selection && rectContains(selection, p));
       setHoveredWindow(canSnap ? windowAt(p) : null);
     }
     if (mode === "draw") {
@@ -973,7 +991,7 @@ export function Overlay({ params }: OverlayProps) {
 
     // Ctrl+click (rather than a drag) on a window in region mode snaps the
     // selection to that window's bounds, still editable and confirmable.
-    if (regionMode && mode === "draw" && e.ctrlKey) {
+    if (regionMode && mode === "draw" && (e.ctrlKey || scrollMode)) {
       const p = toPhys(e.clientX, e.clientY);
       const press = pressPointRef.current;
       const travelled =
@@ -1151,7 +1169,7 @@ export function Overlay({ params }: OverlayProps) {
   // move the bar. Only used to keep it on screen, so an approximation within a
   // few pixels is fine -- it just has to track the real content.
   const quickToolsWidth = (overlayTools.length + 1) * 32 + 24 + 90;
-  const showQuickTools = regionMode && editable && sel !== null && overlayTools.length > 0;
+  const showQuickTools = regionMode && !scrollMode && editable && sel !== null && overlayTools.length > 0;
   /** The quick-tools bar, preferring above the selection. Placed first so the
    * action cluster can step around it. */
   const quickTools =
@@ -1253,6 +1271,23 @@ export function Overlay({ params }: OverlayProps) {
     const rect = selection;
     setSelection(null);
     try {
+      // Scrolling capture takes over from here: Rust hides the overlays,
+      // scrolls the content and stitches, so there is nothing to composite.
+      if (scrollMode) {
+        if (rect) {
+          try {
+            await scrollStart(rect);
+          } catch (err) {
+            // The overlay is still up and the selection has been cleared, so
+            // without this the user is silently back at "pick a window" with
+            // no idea why.
+            setSelection(rect);
+            setStartError(String(err));
+            return;
+          }
+        }
+        return;
+      }
       if (dest !== "default") await selectionSetDest(dest);
       const route = confirmRoute(dest, postCapture, annotations.shapes.length > 0 && !!rect);
       if (route === "plain") {
@@ -1476,6 +1511,10 @@ export function Overlay({ params }: OverlayProps) {
             className="shadow-[var(--shadow-md)]"
             onClick={() => handleCancel()}
           />
+          {/* Scrolling capture has no image yet, so pin/copy/save/edit have
+            * nothing to act on -- it offers only cancel and start. */}
+          {!scrollMode && (
+            <>
           <IconButton
             label="Pin to screen"
             icon={<PinIcon size={16} />}
@@ -1511,8 +1550,10 @@ export function Overlay({ params }: OverlayProps) {
             className="shadow-[var(--shadow-md)]"
             onClick={() => handleEdit()}
           />
+            </>
+          )}
           <IconButton
-            label="Confirm capture"
+            label={scrollMode ? "Start scrolling capture" : "Confirm capture"}
             icon={<Check size={18} />}
             variant="primary"
             size="md"
@@ -1759,7 +1800,9 @@ export function Overlay({ params }: OverlayProps) {
 
       {imageId && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-[11px] text-[var(--bg)] bg-[var(--fg)]/80 px-3 py-1.5 rounded-full pointer-events-none">
-          {pickWindow
+          {startError
+            ? `${startError} · Esc to cancel`
+            : pickWindow
             ? "Click a window to capture it · Esc to cancel"
             : colorMode
               ? `Click to copy color · F for format (${colorFormat.toUpperCase()}) · Esc to cancel`
@@ -1769,7 +1812,11 @@ export function Overlay({ params }: OverlayProps) {
                   ? translateEnabled
                     ? "Drag to select a region to translate · Esc to exit"
                     : "Drag to select a region to extract text · Esc to exit"
-                  : editable
+                  : scrollMode
+                    ? editable
+                      ? "Enter to start scrolling this region · Esc to cancel"
+                      : "Click a window to scroll it, or drag a region · Esc to cancel"
+                    : editable
                     ? "Drag to move · Alt disables edge snap · Enter to capture · Esc to cancel"
                     : "Drag to select · Ctrl+click a window to snap · Alt disables edge snap · Enter to capture · Esc to cancel"}
         </div>

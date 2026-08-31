@@ -41,6 +41,11 @@ pub enum CliCommand {
         #[command(flatten)]
         capture: CaptureArgs,
     },
+    /// Pick a region, then auto-scroll it and stitch a long screenshot.
+    Scroll {
+        #[command(flatten)]
+        capture: CaptureArgs,
+    },
     /// Re-shoot the last confirmed region without showing the overlay.
     /// Needs the app running -- the region is remembered by it.
     RepeatRegion {
@@ -88,6 +93,7 @@ impl CliCommand {
             | CliCommand::ListMonitors => true,
             CliCommand::Window { title, .. } => title.is_some(),
             CliCommand::Region { .. }
+            | CliCommand::Scroll { .. }
             | CliCommand::RepeatRegion { .. }
             | CliCommand::Open { .. } => false,
         }
@@ -299,6 +305,7 @@ pub fn run_headless(cmd: CliCommand) -> Result<(), String> {
             Ok(())
         }
         CliCommand::Region { .. }
+        | CliCommand::Scroll { .. }
         | CliCommand::RepeatRegion { .. }
         | CliCommand::Window { title: None, .. }
         | CliCommand::Open { .. } => {
@@ -448,6 +455,7 @@ pub fn dispatch(app: AppHandle, cmd: CliCommand) {
     match cmd {
         CliCommand::Open { path } => spawn_open(app, path),
         CliCommand::Region { capture } => spawn_capture(app, CaptureMode::Region, capture),
+        CliCommand::Scroll { capture } => spawn_capture(app, CaptureMode::Scroll, capture),
         // Not headless despite showing no overlay: the region it re-shoots is
         // remembered by the running app, so it has to be dispatched into it.
         CliCommand::RepeatRegion { capture } => spawn_capture(app, CaptureMode::RegionRepeat, capture),
@@ -504,6 +512,7 @@ pub fn export_to_sink(app: &AppHandle, img: RgbaImage, output: &OutputArgs, sett
     if let Some(path) = &output.output {
         write_to_path(&img, path).map_err(CommandError::Image)?;
         crate::export::notify_saved(app, &path.to_string_lossy());
+        crate::history::record_saved_file(app, &img, &path.to_string_lossy());
         return Ok(());
     }
     if output.clipboard {
@@ -512,5 +521,6 @@ pub fn export_to_sink(app: &AppHandle, img: RgbaImage, output: &OutputArgs, sett
     let path = crate::export::quicksave_file(settings);
     write_to_path(&img, &path).map_err(CommandError::Image)?;
     crate::export::notify_saved(app, &path.to_string_lossy());
+    crate::history::record_saved_file(app, &img, &path.to_string_lossy());
     Ok(())
 }

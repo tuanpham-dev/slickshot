@@ -137,6 +137,13 @@ pub fn selection_set_rect(app: AppHandle, state: State<SelectionState>, rect: Ph
     out
 }
 
+/// Drops the live selection without the rest of `selection_cancel`'s teardown
+/// (overlay closing, sink clearing). For flows that take the overlay down
+/// themselves and then keep going, like scrolling capture.
+pub fn clear_selection(app: &AppHandle) {
+    *app.state::<SelectionState>().0.lock().unwrap() = Inner::default();
+}
+
 #[tauri::command]
 pub fn selection_cancel(
     app: AppHandle,
@@ -347,6 +354,7 @@ async fn finish_confirm(
         let png = crate::images::encode_png(&composited);
         std::fs::write(&path, &png).map_err(|e| CommandError::Image(e.to_string()))?;
         crate::export::notify_saved(&app, &path.to_string_lossy());
+        crate::history::record_saved_file(&app, &composited, &path.to_string_lossy());
         return Ok(());
     }
 

@@ -21,6 +21,12 @@ pub struct EditorImage(pub Mutex<Option<String>>);
 #[derive(Default)]
 pub struct PendingEditorShapes(pub Mutex<String>);
 
+/// Which history entry the capture currently in the editor came from, when it
+/// came from one. Saving consults it so a re-edit updates that entry instead
+/// of breeding a new card per save; every fresh capture clears it.
+#[derive(Default)]
+pub struct HistoryOrigin(pub Mutex<Option<String>>);
+
 /// Returns the pending annotations (as the JSON the overlay serialized) and
 /// clears them, so a later capture cannot inherit an earlier one's shapes.
 #[tauri::command]
@@ -62,6 +68,10 @@ fn ensure_window(app: &AppHandle, initial_image: Option<&str>) -> Result<Webview
 /// `editor_ready` once the webview has drawn the new image -- showing it
 /// here flashed a blank window (or the previous capture) while loading.
 pub async fn show(app: &AppHandle, image_id: &str) -> CommandResult<()> {
+    // A capture arriving here is fresh unless the caller says otherwise
+    // (`history_open_in_editor` re-sets this immediately after), so saving it
+    // creates its own entry rather than overwriting whatever was open before.
+    *app.state::<HistoryOrigin>().0.lock().unwrap() = None;
     let images = app.state::<ImageStore>();
     let current = app.state::<EditorImage>();
     let previous = current.0.lock().unwrap().replace(image_id.to_string());

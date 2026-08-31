@@ -9,6 +9,7 @@ import { Switch } from "../ui/Switch";
 import { Field, Input } from "../ui/Field";
 import { Button } from "../ui/Button";
 import { ShortcutRecorder } from "../ui/ShortcutRecorder";
+import { historyClear } from "../lib/ipc";
 import { OVERLAY_TOOLS } from "../overlay/tools";
 import { ConfirmDialog } from "../ui/Dialog";
 import { useToast } from "../ui/Toast";
@@ -42,6 +43,7 @@ const MODE_LABELS: Record<CaptureMode, string> = {
   color: "Pick color",
   measure: "Measure",
   region_quicksave: "Region to file",
+  scroll: "Scrolling capture",
 };
 
 const TARGET_LANGUAGES: { value: string; label: string }[] = [
@@ -72,6 +74,7 @@ function findConflict(hotkeys: AppSettings["hotkeys"], mode: CaptureMode, accele
 export function Settings({ onBack }: { onBack: () => void }) {
   const [settings, setLocalSettings] = useState<AppSettings | null>(null);
   const [resetOpen, setResetOpen] = useState(false);
+  const [clearHistoryOpen, setClearHistoryOpen] = useState(false);
   const [hotkeyErrors, setHotkeyErrors] = useState<string[]>([]);
   const [ocrLangs, setOcrLangs] = useState<string[]>([]);
   const [ocrStatus, setOcrStatus] = useState<OcrEngineStatus | null>(null);
@@ -352,6 +355,29 @@ export function Settings({ onBack }: { onBack: () => void }) {
           {settings.default_format === "webp" && (
             <p className="text-xs text-[var(--fg-muted)]">WebP is written losslessly, so quality settings do not apply.</p>
           )}
+        </section>
+
+        <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
+          <h2 className="text-sm font-semibold text-[var(--fg)]">History</h2>
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col">
+              <span className="text-sm text-[var(--fg)]">Keep capture history</span>
+              <span className="text-xs text-[var(--fg-muted)]">
+                Index screenshots you save, so they reopen with their annotations.
+              </span>
+            </div>
+            <Switch
+              aria-label="Keep capture history"
+              checked={settings.capture_history}
+              onChange={(v) => update({ capture_history: v })}
+            />
+          </div>
+          <div className="flex items-center justify-between">
+            <span className="text-sm text-[var(--fg)]">Clear capture history</span>
+            <Button variant="secondary" size="sm" onClick={() => setClearHistoryOpen(true)}>
+              Clear
+            </Button>
+          </div>
         </section>
 
         <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
@@ -669,6 +695,22 @@ export function Settings({ onBack }: { onBack: () => void }) {
         confirmLabel="Reset"
         danger
         onConfirm={handleReset}
+      />
+      <ConfirmDialog
+        open={clearHistoryOpen}
+        onOpenChange={setClearHistoryOpen}
+        title="Clear capture history?"
+        description="Forgets every entry and deletes the copies SlickShot keeps. The screenshots you saved yourself are left alone."
+        confirmLabel="Clear"
+        danger
+        onConfirm={async () => {
+          try {
+            await historyClear();
+            toast.show({ kind: "success", title: "Capture history cleared" });
+          } catch (err) {
+            toast.show({ kind: "error", title: "Couldn't clear history", description: String(err) });
+          }
+        }}
       />
     </div>
   );

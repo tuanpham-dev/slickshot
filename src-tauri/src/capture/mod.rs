@@ -1,3 +1,5 @@
+pub mod input;
+pub mod stitch;
 mod xcap_backend;
 
 use image::RgbaImage;

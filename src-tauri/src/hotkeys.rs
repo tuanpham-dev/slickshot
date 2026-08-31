@@ -61,6 +61,12 @@ pub fn default_bindings() -> Vec<HotkeyBinding> {
             accelerator: String::new(),
             mode: CaptureMode::RegionQuicksave,
         },
+        // Unbound by default like the others below Region/Screen/Window: a
+        // new mode should not claim a shortcut the user may already use.
+        HotkeyBinding {
+            accelerator: String::new(),
+            mode: CaptureMode::Scroll,
+        },
     ]
 }
 

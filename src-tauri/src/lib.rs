@@ -6,6 +6,7 @@ mod editor;
 mod export;
 mod face;
 mod geometry;
+mod history;
 mod hotkeys;
 mod images;
 mod ocr;
@@ -13,6 +14,7 @@ mod overlay;
 mod pin;
 mod qr;
 mod ready;
+mod scroll;
 mod selection;
 mod session;
 mod settings;
@@ -85,6 +87,8 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .manage(commands::OverlayShapes::default())
         .manage(editor::PendingEditorShapes::default())
         .manage(selection::ConfirmDestOverride::default())
+        .manage(editor::HistoryOrigin::default())
+        .manage(scroll::ScrollSession::default())
         .manage(thumbnail::ThumbnailImage::default())
         .manage(update::PendingUpdate::default())
         .manage(ready::MountedWindows::default())
@@ -118,6 +122,15 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             selection::selection_region_image,
             selection::selection_confirm_to_editor,
             editor::take_pending_shapes,
+            scroll::scroll_start,
+            scroll::scroll_stop,
+            scroll::scroll_cancel,
+            history::history_list,
+            history::history_thumb,
+            history::history_copy,
+            history::history_delete,
+            history::history_clear,
+            history::history_open_in_editor,
             selection::selection_confirm_window,
             export::export_prepare,
             export::export_commit,

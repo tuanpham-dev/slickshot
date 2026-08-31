@@ -569,7 +569,14 @@ export function Editor({ params }: EditorProps) {
     setExporting(true);
     try {
       const bytes = await flattenToPng(exportBase() ?? canvases.base, shapes, exportOptions());
-      await exportPrepare(action);
+      // Attached here rather than at each call site: every save path already
+      // flattens the same `shapes`, and history wants them alongside the
+      // base image so the entry reopens editable.
+      await exportPrepare(
+        action.kind === "clipboard"
+          ? action
+          : { ...action, shapes: shapes.length > 0 ? JSON.stringify(shapes) : undefined },
+      );
       const result = await exportCommit(bytes);
       if (action.kind === "clipboard") {
         toast.show({ kind: "success", title: "Copied to clipboard" });
@@ -1079,7 +1086,13 @@ export function Editor({ params }: EditorProps) {
         />
       )}
       <div className="flex flex-1 min-h-0">
-        <div className="flex-1 overflow-auto flex items-center justify-center p-6" ref={baseCanvasQuery}>
+        {/* Centred with the child's `m-auto`, not `items-center
+            justify-center`: those overflow a too-large child equally in both
+            directions, and the half that spills past the container's *start*
+            edge cannot be scrolled to -- zoom in and the top and left of the
+            image become unreachable. Auto margins collapse to zero once the
+            child no longer fits, so it scrolls from its true top-left. */}
+        <div className="flex-1 overflow-auto flex p-6" ref={baseCanvasQuery}>
           <Canvas
             baseImage={baseImage}
             onCursorMove={setCursor}

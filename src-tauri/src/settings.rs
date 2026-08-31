@@ -98,6 +98,10 @@ fn default_auto_save() -> bool {
     true
 }
 
+fn default_capture_history() -> bool {
+    true
+}
+
 /// The tools the capture overlay offers for quick markup: enough to annotate
 /// without opening the editor, few enough that the bar stays a bar.
 fn default_overlay_tools() -> Vec<String> {
@@ -238,6 +242,11 @@ pub struct Settings {
     /// Ignored by the deb/rpm/AUR builds, which the package manager owns.
     #[serde(default = "default_auto_check_updates")]
     pub auto_check_updates: bool,
+    /// Index captures the user saved to disk, so they can be reopened later
+    /// with their annotations still editable. Only saved/exported captures
+    /// are recorded -- a copy-only capture leaves no trace.
+    #[serde(default = "default_capture_history")]
+    pub capture_history: bool,
     /// Which annotation tools the region overlay's quick-tools bar offers,
     /// in bar order.
     #[serde(
@@ -277,6 +286,7 @@ impl Default for Settings {
             s3_key_prefix: String::new(),
             s3_public_base: String::new(),
             auto_check_updates: default_auto_check_updates(),
+            capture_history: default_capture_history(),
             overlay_tools: default_overlay_tools(),
         }
     }
@@ -397,6 +407,25 @@ mod tests {
         assert!(!settings.translate_target.is_empty());
         assert_eq!(settings.upload_provider, UploadProvider::Catbox);
         assert!(settings.imgur_client_id.is_empty());
+    }
+
+    /// A `settings.json` predating capture history keeps the feature on: it
+    /// only indexes files the user already chose to write to disk.
+    #[test]
+    fn old_settings_json_defaults_capture_history_on() {
+        let old_json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": true,
+            "copy_on_capture": false,
+            "theme": "system"
+        });
+
+        let settings: Settings = serde_json::from_value(old_json).expect("must still deserialize");
+        assert!(settings.capture_history);
     }
 
     /// A `settings.json` predating the capture overlay's quick tools must

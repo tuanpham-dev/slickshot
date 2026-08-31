@@ -1,6 +1,6 @@
 use std::sync::Mutex;
 
-use tauri::menu::{CheckMenuItem, MenuBuilder, MenuEvent, MenuItem, SubmenuBuilder};
+use tauri::menu::{CheckMenuItem, MenuBuilder, MenuEvent, MenuItem, Submenu, SubmenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -55,6 +55,51 @@ pub struct DelayMenuItems(pub Mutex<Vec<(u32, CheckMenuItem<tauri::Wry>)>>);
 /// platforms where tray menus can show it.
 pub struct CaptureMenuItems(pub Mutex<Vec<(CaptureMode, MenuItem<tauri::Wry>)>>);
 
+/// The Monitor submenu, kept so its contents can be rebuilt. Monitors come
+/// and go -- a laptop docks, a cable is pulled -- and a list read once at
+/// startup would offer screens that no longer exist and hide ones that do.
+pub struct MonitorMenu(pub Mutex<Submenu<tauri::Wry>>);
+
+/// Replaces the Monitor submenu's items with the monitors attached right now.
+///
+/// The menu is rebuilt rather than watched: there is no monitor-change event
+/// to subscribe to, and enumerating a handful of screens is cheap enough to
+/// do whenever the tray is used.
+pub fn refresh_monitors(app: &AppHandle) {
+    let Some(state) = app.try_state::<MonitorMenu>() else {
+        return;
+    };
+    let submenu = state.0.lock().unwrap();
+    let Ok(existing) = submenu.items() else {
+        return;
+    };
+    for item in existing {
+        let _ = submenu.remove(&item);
+    }
+    let monitors = app
+        .state::<Capturer>()
+        .0
+        .monitors()
+        .unwrap_or_default();
+    if monitors.is_empty() {
+        if let Ok(none) = MenuItem::with_id(app, "monitor_none", "No monitors found", false, None::<&str>) {
+            let _ = submenu.append(&none);
+        }
+        return;
+    }
+    for m in monitors {
+        let name = if m.name.is_empty() {
+            format!("Monitor {}", m.id)
+        } else {
+            m.name.clone()
+        };
+        let label = format!("{name} ({}×{})", m.rect.w, m.rect.h);
+        if let Ok(item) = MenuItem::with_id(app, format!("monitor_{}", m.id), label, true, None::<&str>) {
+            let _ = submenu.append(&item);
+        }
+    }
+}
+
 /// "Translate/Extract text" once translation is layered on top of OCR,
 /// "Extract text" for plain OCR -- mirrors `MainWindow.tsx`'s tile label.
 fn ocr_menu_label(translate_enabled: bool) -> &'static str {
@@ -76,6 +121,7 @@ fn capture_label(mode: CaptureMode, translate_enabled: bool) -> &'static str {
         CaptureMode::Color => "Pick color",
         CaptureMode::Measure => "Measure",
         CaptureMode::RegionQuicksave => "Capture region to file",
+        CaptureMode::Scroll => "Scrolling capture",
     }
 }
 
@@ -143,7 +189,15 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         true,
         accel_for(&settings.hotkeys, CaptureMode::Measure),
     )?;
+    let capture_scroll = MenuItem::with_id(
+        app,
+        "capture_scroll",
+        capture_label(CaptureMode::Scroll, settings.translate_enabled),
+        true,
+        accel_for(&settings.hotkeys, CaptureMode::Scroll),
+    )?;
 
+    let history = MenuItem::with_id(app, "open_history", "Capture history", true, None::<&str>)?;
     let open_image = MenuItem::with_id(app, "open_image", "Open image…", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "open_settings", "Settings", true, None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -155,7 +209,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         (CaptureMode::RegionRepeat, capture_repeat.clone()),
         (CaptureMode::Color, pick_color.clone()),
         (CaptureMode::Measure, measure.clone()),
+        (CaptureMode::Scroll, capture_scroll.clone()),
     ])));
+
+    // Built empty and filled by `refresh_monitors` below, so there is one
+    // place that knows how a monitor is labelled.
+    let monitor_submenu = SubmenuBuilder::new(app, "Monitor").build()?;
+    app.manage(MonitorMenu(Mutex::new(monitor_submenu.clone())));
+    refresh_monitors(app);
 
     let mut delay_items = Vec::new();
     let mut delay_submenu = SubmenuBuilder::new(app, "Delay");
@@ -177,9 +238,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .item(&open_main)
         .separator()
+        // Same order as the main window's tiles, so the two surfaces read
+        // the same way. "Repeat last region" has no tile of its own and sits
+        // at the end of the capture group.
         .item(&capture_region)
-        .item(&capture_screen)
         .item(&capture_window)
+        .item(&monitor_submenu)
+        .item(&capture_screen)
+        .item(&capture_scroll)
         .item(&capture_ocr)
         .item(&capture_repeat)
         .item(&delay_submenu)
@@ -187,6 +253,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .item(&pick_color)
         .item(&measure)
         .separator()
+        .item(&history)
         .item(&open_image)
         .item(&settings_item)
         .separator()
@@ -235,6 +302,11 @@ fn show_main(app: &AppHandle) {
 fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
     let id = event.id().0.as_str();
 
+    // Rebuilt after each interaction rather than before the menu opens: the
+    // tray host pops the menu itself and gives us no chance to run first, so
+    // this is the closest hook there is.
+    refresh_monitors(app);
+
     match id {
         "open_main" => show_main(app),
         "open_settings" => {
@@ -253,8 +325,22 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
         "capture_region_repeat" => trigger(app, CaptureMode::RegionRepeat),
         "capture_color" => trigger(app, CaptureMode::Color),
         "capture_measure" => trigger(app, CaptureMode::Measure),
+        "capture_scroll" => trigger(app, CaptureMode::Scroll),
+        "open_history" => {
+            show_main(app);
+            // Same shape as "Settings" above: the window on its own would
+            // open on whatever view it was last left on.
+            if let Some(main) = app.get_webview_window("main") {
+                let _ = main.emit("open_history", ());
+            }
+        }
         "open_image" => open_image_dialog(app),
         "quit" => app.exit(0),
+        _ if id.starts_with("monitor_") => {
+            if let Some(monitor) = id.strip_prefix("monitor_").and_then(|i| i.parse::<u32>().ok()) {
+                trigger_target(app, CaptureMode::Monitor, Some(monitor));
+            }
+        }
         _ if id.starts_with("delay_") => {
             if let Some((ms, _)) = DELAY_OPTIONS.iter().find(|(_, i)| *i == id) {
                 update_delay(app, *ms);
@@ -265,13 +351,17 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
 }
 
 fn trigger(app: &AppHandle, mode: CaptureMode) {
+    trigger_target(app, mode, None)
+}
+
+fn trigger_target(app: &AppHandle, mode: CaptureMode, target_id: Option<u32>) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let delay_ms = get_settings(app.clone()).map(|s| s.default_delay_ms).unwrap_or(0);
         let capturer = app.state::<Capturer>();
         let session = app.state::<Mutex<Option<CaptureSession>>>();
         let images = app.state::<ImageStore>();
-        let _ = run_capture(&app, capturer.inner(), session.inner(), images.inner(), mode, delay_ms, None).await;
+        let _ = run_capture(&app, capturer.inner(), session.inner(), images.inner(), mode, delay_ms, target_id).await;
     });
 }
 

@@ -15,6 +15,11 @@ export interface ClusterPlacement {
   top: number;
 }
 
+/** Horizontal placement. Clusters normally centre on the selection, but one
+ * pinned inside the bottom edge would land on the hint bar, which is centred
+ * there too -- so those move to the right instead. */
+type Align = "center" | "right";
+
 /** Places a floating cluster (the action buttons, the quick-tools bar) beside
  * the selection and fully on this monitor.
  *
@@ -41,10 +46,13 @@ export function placeCluster(
 ): ClusterPlacement {
   const half = size.w / 2;
   const minLeft = margin + half;
-  const left = Math.min(
-    Math.max(((sel.left + sel.right) / 2) * container.w, minLeft),
-    Math.max(container.w - margin - half, minLeft),
-  );
+  const centred = (align: Align) =>
+    align === "right"
+      ? Math.max(container.w - margin - half, minLeft)
+      : Math.min(
+          Math.max(((sel.left + sel.right) / 2) * container.w, minLeft),
+          Math.max(container.w - margin - half, minLeft),
+        );
 
   const below = sel.bottom * container.h + gap;
   const above = sel.top * container.h - size.h - gap;
@@ -52,15 +60,22 @@ export function placeCluster(
   const fitsAbove = above >= margin;
 
   let top: number;
+  let align: Align = "center";
   if (prefer === "below") {
-    top = fitsBelow
-      ? below
-      : fitsAbove
-        ? above
-        : Math.max(margin, container.h - size.h - margin);
+    if (fitsBelow) {
+      top = below;
+    } else if (fitsAbove) {
+      top = above;
+    } else {
+      // No room outside the selection at all: pinned inside the bottom edge,
+      // where the hint bar already sits centred.
+      top = Math.max(margin, container.h - size.h - margin);
+      align = "right";
+    }
   } else {
     top = fitsAbove ? above : fitsBelow ? below : margin;
   }
+  const left = centred(align);
 
   if (avoid && top < avoid.top + avoid.height && avoid.top < top + size.h) {
     // Stack on the far side of the taken band, so the two clusters read as

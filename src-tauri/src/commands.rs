@@ -16,6 +16,9 @@ pub enum CaptureMode {
     Screen,
     Monitor,
     Region,
+    /// Picks a region, then auto-scrolls the content under it and stitches
+    /// the frames into one long screenshot.
+    Scroll,
     /// Re-shoots the last confirmed region without showing an overlay.
     #[serde(rename = "region_repeat")]
     RegionRepeat,
@@ -274,6 +277,7 @@ pub async fn run_capture(
         }
         CaptureMode::Region
         | CaptureMode::RegionQuicksave
+        | CaptureMode::Scroll
         | CaptureMode::Window
         | CaptureMode::Translate
         | CaptureMode::Color
@@ -300,6 +304,7 @@ pub async fn run_capture(
         mode,
         CaptureMode::Region
             | CaptureMode::RegionQuicksave
+            | CaptureMode::Scroll
             | CaptureMode::Window
             | CaptureMode::Translate
             | CaptureMode::Color
