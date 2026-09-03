@@ -748,7 +748,7 @@ mod tests {
 
     #[test]
     fn a_sticky_header_is_not_appended_twice() {
-        let mut src = page(64, 600);
+        let src = page(64, 600);
         // Paint a fixed 20-row header that every viewport will show.
         let header = page(64, 20);
         let mut s = {
@@ -757,7 +757,7 @@ mod tests {
             Stitcher::new(first, 10_000)
         };
         for top in [50u32, 100, 150] {
-            let mut frame = viewport(&mut src, top, 200);
+            let mut frame = viewport(&src, top, 200);
             image::imageops::replace(&mut frame, &header, 0, 0);
             s.push(frame, None);
         }

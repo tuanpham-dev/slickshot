@@ -112,7 +112,7 @@ mod platform {
 
     pub fn wheel_down(steps: u32) -> InputResult<()> {
         for _ in 0..steps {
-            let mut input = INPUT {
+            let input = INPUT {
                 r#type: INPUT_MOUSE,
                 Anonymous: windows_sys::Win32::UI::Input::KeyboardAndMouse::INPUT_0 {
                     mi: MOUSEINPUT {
@@ -128,7 +128,7 @@ mod platform {
             // SAFETY: one fully-initialised INPUT is passed with its own size,
             // which is exactly the contract SendInput documents.
             let sent = unsafe {
-                SendInput(1, &mut input, std::mem::size_of::<INPUT>() as i32)
+                SendInput(1, &input, std::mem::size_of::<INPUT>() as i32)
             };
             if sent != 1 {
                 return Err(InputError("the system rejected the scroll event".into()));

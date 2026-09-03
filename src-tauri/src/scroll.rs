@@ -255,7 +255,7 @@ fn settle(
             let mask = (covered as f32) < MAX_MASK_FRACTION * ignored.len() as f32;
             return Ok(Settled {
                 frame: current,
-                mask: mask.then(|| Mask { width: mw, height: mh, ignored }),
+                mask: mask.then_some(Mask { width: mw, height: mh, ignored }),
                 moved: true,
             });
         }
