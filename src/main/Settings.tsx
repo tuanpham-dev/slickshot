@@ -25,8 +25,10 @@ import {
   gdriveSignIn,
   gdriveSignOut,
   gdriveAccount as gdriveAccountQuery,
+  versionInfo,
   checkUpdate,
   installUpdate,
+  type VersionInfo,
   type UpdateStatus,
   type AppSettings,
   type CaptureMode,
@@ -81,6 +83,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
   const [checkingOcr, setCheckingOcr] = useState(false);
   const [gdriveAccount, setGdriveAccount] = useState<string | null>(null);
   const [gdriveBusy, setGdriveBusy] = useState(false);
+  const [version, setVersion] = useState<VersionInfo | null>(null);
   const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
   const [updateChecking, setUpdateChecking] = useState(false);
   const [updateInstalling, setUpdateInstalling] = useState(false);
@@ -103,8 +106,13 @@ export function Settings({ onBack }: { onBack: () => void }) {
     gdriveAccountQuery()
       .then(setGdriveAccount)
       .catch(() => {});
-    // Cheap on this path: reports the running version and, on unsupported
-    // builds, says so -- without contacting the release feed.
+    // Local-only: reports the running version and, on unsupported builds,
+    // says so -- without contacting the release feed, which checkUpdate()
+    // below does and can fail (offline, no release published, a firewall),
+    // and shouldn't take the version display down with it.
+    versionInfo()
+      .then(setVersion)
+      .catch(() => {});
     checkUpdate()
       .then(setUpdateStatus)
       .catch(() => {});
@@ -637,7 +645,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
           <h2 className="text-sm font-semibold text-[var(--fg)]">Updates</h2>
           <div className="flex items-center justify-between">
             <span className="text-sm text-[var(--fg)]">
-              Version {updateStatus?.current_version ?? "…"}
+              Version {version?.current_version ?? updateStatus?.current_version ?? "…"}
             </span>
             <Button
               variant="secondary"
@@ -648,12 +656,12 @@ export function Settings({ onBack }: { onBack: () => void }) {
               {updateChecking ? "Checking…" : "Check for updates"}
             </Button>
           </div>
-          {updateStatus && !updateStatus.supported && (
+          {version && !version.supported && (
             <p className="text-xs text-[var(--fg-muted)]">
               This build is managed by your package manager -- update SlickShot the same way you installed it.
             </p>
           )}
-          {updateStatus?.supported && (
+          {(version?.supported ?? updateStatus?.supported) && (
             <div className="flex items-center justify-between">
               <span className="text-sm text-[var(--fg)]">Check automatically</span>
               <Switch

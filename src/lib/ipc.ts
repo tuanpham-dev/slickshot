@@ -234,6 +234,17 @@ export interface UpdateStatus {
   available: AvailableUpdate | null;
 }
 
+export interface VersionInfo {
+  current_version: string;
+  /** Same meaning as `UpdateStatus.supported`. */
+  supported: boolean;
+}
+
+/** Local-only: the running version and updater support, no network. Safe to
+ * call unconditionally (e.g. on Settings mount) even when the release feed
+ * is unreachable -- unlike `checkUpdate`, which fails in that case. */
+export const versionInfo = () => call<VersionInfo>("version_info");
+
 export const checkUpdate = () => call<UpdateStatus>("check_update");
 /** Downloads, installs and relaunches -- does not resolve on success. */
 export const installUpdate = () => call<void>("install_update");

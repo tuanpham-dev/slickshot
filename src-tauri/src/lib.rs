@@ -143,6 +143,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             drive::gdrive_sign_in,
             drive::gdrive_sign_out,
             drive::gdrive_account,
+            update::version_info,
             update::check_update,
             update::install_update,
             face::detect_faces,

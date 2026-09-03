@@ -51,6 +51,30 @@ fn updater_supported() -> bool {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct VersionInfo {
+    pub current_version: String,
+    /// Same meaning as `UpdateStatus::supported`, available without a network
+    /// round-trip so the UI can show the running version and gate the
+    /// "check automatically" toggle before -- or even without ever -- calling
+    /// `check_update`.
+    pub supported: bool,
+}
+
+/// Local-only counterpart to `check_update`: the running version and whether
+/// this build can self-update at all, neither of which needs the release
+/// feed. Settings calls this on mount so the version number and the
+/// package-manager-vs-updater messaging always show, even when the feed is
+/// unreachable (no internet, no release published yet, a firewall) -- a
+/// state `check_update` treats as a hard error.
+#[tauri::command]
+pub fn version_info(app: AppHandle) -> VersionInfo {
+    VersionInfo {
+        current_version: app.package_info().version.to_string(),
+        supported: updater_supported(),
+    }
+}
+
 #[tauri::command]
 pub async fn check_update(app: AppHandle, state: tauri::State<'_, PendingUpdate>) -> CommandResult<UpdateStatus> {
     let current_version = app.package_info().version.to_string();
