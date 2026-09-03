@@ -78,7 +78,7 @@ pub fn overlay_set_shapes(app: AppHandle, state: State<OverlayShapes>, json: Str
 #[derive(Default)]
 pub struct MainWasVisible(pub Mutex<bool>);
 
-#[derive(Debug, thiserror::Error, Serialize)]
+#[derive(Debug, thiserror::Error)]
 pub enum CommandError {
     #[error("capture failed: {0}")]
     Capture(String),
@@ -88,6 +88,16 @@ pub enum CommandError {
     Window(String),
     #[error("image error: {0}")]
     Image(String),
+}
+
+/// Serializes to its `Display` message rather than the derived tagged-enum
+/// shape (`{"Image": "..."}`) -- the frontend surfaces this string directly
+/// in error toasts, and the tagged form showed up there as raw JSON instead
+/// of readable text.
+impl Serialize for CommandError {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.to_string())
+    }
 }
 
 pub type CommandResult<T> = Result<T, CommandError>;
