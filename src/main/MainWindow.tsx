@@ -24,6 +24,7 @@ import {
   setSettings,
   onOpenHistory,
   onOpenSettings,
+  onUpdateAvailable,
   ocrEngineStatus,
   type AppSettings,
   type CaptureMode,
@@ -280,6 +281,25 @@ export function MainWindow() {
     return () => {
       unlisten.then((fn) => fn());
     };
+  }, []);
+
+  // The background update check (10s after launch) emits this even if
+  // Settings is never opened -- without this listener it went nowhere and
+  // the user had no way to learn an update was found short of opening
+  // Settings and clicking "Check for updates" themselves.
+  useEffect(() => {
+    const unlisten = onUpdateAvailable((update) => {
+      toast.show({
+        kind: "info",
+        title: `SlickShot ${update.version} is available`,
+        actionLabel: "View",
+        onAction: () => setSettingsOpen(true),
+      });
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   function handleDelayChange(next: DelayOption) {
