@@ -228,6 +228,20 @@ pub async fn run_capture(
 ) -> CommandResult<()> {
     let app = app.clone();
 
+    // A live `CaptureSession` means an interactive capture is already in
+    // flight -- its overlay open, possibly mid-drag. Every mode that opens
+    // one leaves it `Some` until confirm/cancel resets it (the headless
+    // Screen/Monitor/RegionRepeat-with-a-stored-rect paths reset it to
+    // `None` themselves right after use), so this is a reliable signal.
+    // Without this guard, a re-triggered hotkey or CLI call (e.g. a user
+    // double-tapping PrintScreen) grabs a fresh frame and replaces the
+    // session out from under the in-progress one, leaving the frontend's
+    // selection paired with a mismatched backend session -- confirming it
+    // then produces a corrupted (sometimes 1x1) capture instead of an error.
+    if session.lock().unwrap().is_some() {
+        return Ok(());
+    }
+
     let main_visible = app
         .get_webview_window("main")
         .map(|w| w.is_visible().unwrap_or(false))
