@@ -78,6 +78,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .manage(SelectionState::default())
         .manage(EditorImage::default())
         .manage(MainWasVisible::default())
+        .manage(commands::CaptureClaim::default())
         .manage(PendingExport::default())
         .manage(pin::PinWindows::default())
         .manage(cli::CliSink::default())

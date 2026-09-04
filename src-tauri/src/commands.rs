@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -77,6 +78,34 @@ pub fn overlay_set_shapes(app: AppHandle, state: State<OverlayShapes>, json: Str
 /// already hidden) doesn't unexpectedly pop it up.
 #[derive(Default)]
 pub struct MainWasVisible(pub Mutex<bool>);
+
+/// Claims the window between a capture trigger and the point another signal
+/// takes over watching it -- either a headless mode finishing, or an
+/// interactive one's overlay actually opening (from there, `OverlayImages`
+/// being non-empty is the reliable "don't clobber this" signal, since every
+/// path that ends an interactive capture -- confirm, cancel, starting a
+/// scrolling capture -- already empties it via `close_overlays`). Nothing
+/// else signals "a grab is in flight" during the claimed window: the delay
+/// wait and the grab itself both happen before `session`/the overlay exist.
+/// See `run_capture` and `ClaimGuard`.
+#[derive(Default)]
+pub struct CaptureClaim(pub AtomicBool);
+
+/// Releases `CaptureClaim` when dropped -- on every exit from `run_capture`,
+/// including an early `?` return, since it's a plain local variable that
+/// lives for the whole function. That's correct for every path: the claim
+/// only has to survive to the *end* of `run_capture`, at which point either
+/// a headless mode has already finished, or an interactive one's overlay has
+/// already opened and `OverlayImages` has taken over guarding it (see
+/// `CaptureClaim`) -- so releasing here on every path, without distinguishing
+/// them, is exactly right.
+struct ClaimGuard(AppHandle);
+
+impl Drop for ClaimGuard {
+    fn drop(&mut self) {
+        self.0.state::<CaptureClaim>().0.store(false, Ordering::SeqCst);
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
@@ -228,19 +257,37 @@ pub async fn run_capture(
 ) -> CommandResult<()> {
     let app = app.clone();
 
-    // A live `CaptureSession` means an interactive capture is already in
-    // flight -- its overlay open, possibly mid-drag. Every mode that opens
-    // one leaves it `Some` until confirm/cancel resets it (the headless
-    // Screen/Monitor/RegionRepeat-with-a-stored-rect paths reset it to
-    // `None` themselves right after use), so this is a reliable signal.
-    // Without this guard, a re-triggered hotkey or CLI call (e.g. a user
-    // double-tapping PrintScreen) grabs a fresh frame and replaces the
-    // session out from under the in-progress one, leaving the frontend's
-    // selection paired with a mismatched backend session -- confirming it
-    // then produces a corrupted (sometimes 1x1) capture instead of an error.
-    if session.lock().unwrap().is_some() {
+    // Guards two back-to-back phases of an interactive capture that a
+    // re-triggered hotkey/CLI call (e.g. a double-tap, or pressing again
+    // during a delay countdown) could otherwise clobber:
+    //  1. From here to the overlay actually opening, or a headless mode
+    //     finishing -- `CaptureClaim`. Nothing else signals "a grab is in
+    //     flight" during this window: the delay wait and the grab itself
+    //     both happen before `session`/the overlay exist yet.
+    //  2. From the overlay opening to the user confirming or cancelling it,
+    //     or starting a scrolling capture -- `OverlayImages`, which every
+    //     one of those paths already empties via `close_overlays`, so this
+    //     phase needs no separate release here.
+    // An earlier version of this guard checked `session.is_some()` for
+    // phase 2 instead. That regressed: `selection_cancel` and `scroll_start`
+    // never reset `session` (nothing needed to, before this guard existed),
+    // so cancelling a capture -- or finishing a scrolling one -- left it
+    // `Some` forever and silently swallowed every capture after it.
+    if !app
+        .state::<crate::overlay::OverlayImages>()
+        .0
+        .lock()
+        .unwrap()
+        .is_empty()
+    {
         return Ok(());
     }
+    if app.state::<CaptureClaim>().0.swap(true, Ordering::SeqCst) {
+        return Ok(());
+    }
+    // Never read again -- it exists only to release `CaptureClaim` (via
+    // `Drop`) at the end of this function on every path. See `ClaimGuard`.
+    let _claim_guard = ClaimGuard(app.clone());
 
     let main_visible = app
         .get_webview_window("main")
