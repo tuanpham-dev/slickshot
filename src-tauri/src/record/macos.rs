@@ -41,6 +41,29 @@ extern "C" {
         dst: *const c_char,
         err_out: *mut *mut c_char,
     ) -> bool;
+    fn tas_video_decode(
+        path: *const c_char,
+        start_s: f64,
+        end_s: f64,
+        fps: u32,
+        ctx: *mut c_void,
+        on_frame: extern "C" fn(*mut c_void, *const u8, u32, u32, u32, f64) -> bool,
+        err_out: *mut *mut c_char,
+    ) -> i32;
+    #[allow(clippy::too_many_arguments)]
+    fn tas_video_transcode(
+        src: *const c_char,
+        dst: *const c_char,
+        start_s: f64,
+        end_s: f64,
+        speed: f64,
+        out_w: u32,
+        out_h: u32,
+        keep_audio: bool,
+        ctx: *mut c_void,
+        process: extern "C" fn(*mut c_void, *const u8, u32, u32, u32, *mut u8, *mut f64) -> bool,
+        err_out: *mut *mut c_char,
+    ) -> i32;
     fn tas_record_free(p: *mut c_char);
 }
 
@@ -220,26 +243,90 @@ impl VideoBackend for MacBackend {
 
     fn decode_frames(
         &self,
-        _path: &Path,
-        _range: TimeRange,
-        _fps: u32,
-        _on_frame: &mut dyn FnMut(RgbaFrame) -> bool,
+        path: &Path,
+        range: TimeRange,
+        fps: u32,
+        on_frame: &mut dyn FnMut(RgbaFrame) -> bool,
     ) -> RecordResult<()> {
-        Err(RecordError::Unsupported(
-            "decoding isn't wired up yet".into(),
-        ))
+        let c = c_path(path)?;
+        let mut state = DecodeCtx {
+            on_frame,
+            panicked: false,
+        };
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let rc = unsafe {
+            tas_video_decode(
+                c.as_ptr(),
+                range.start_ms as f64 / 1000.0,
+                range.end_ms as f64 / 1000.0,
+                fps,
+                &mut state as *mut DecodeCtx as *mut c_void,
+                decode_trampoline,
+                &mut err,
+            )
+        };
+        if let Some(message) = unsafe { take_err(err) } {
+            return Err(RecordError::Backend(message));
+        }
+        if state.panicked {
+            return Err(RecordError::Backend(
+                "decoding a frame failed unexpectedly".into(),
+            ));
+        }
+        if rc != 0 {
+            return Err(RecordError::Backend("couldn't decode that recording".into()));
+        }
+        Ok(())
     }
 
     fn transcode(
         &self,
-        _src: &Path,
-        _dst: &Path,
-        _opts: &TranscodeOptions,
-        _process: &mut dyn FnMut(RgbaFrame) -> Option<RgbaFrame>,
+        src: &Path,
+        dst: &Path,
+        opts: &TranscodeOptions,
+        process: &mut dyn FnMut(RgbaFrame) -> Option<RgbaFrame>,
     ) -> RecordResult<()> {
-        Err(RecordError::Unsupported(
-            "exporting isn't wired up yet".into(),
-        ))
+        let (s, d) = (c_path(src)?, c_path(dst)?);
+        let (out_w, out_h) = opts.output;
+        if out_w < 2 || out_h < 2 {
+            return Err(RecordError::Backend(
+                "that export size is too small".into(),
+            ));
+        }
+        let mut state = TranscodeCtx {
+            process,
+            out_w,
+            out_h,
+            panicked: false,
+        };
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let rc = unsafe {
+            tas_video_transcode(
+                s.as_ptr(),
+                d.as_ptr(),
+                opts.range.start_ms as f64 / 1000.0,
+                opts.range.end_ms as f64 / 1000.0,
+                opts.speed as f64,
+                out_w,
+                out_h,
+                opts.keep_audio,
+                &mut state as *mut TranscodeCtx as *mut c_void,
+                transcode_trampoline,
+                &mut err,
+            )
+        };
+        if let Some(message) = unsafe { take_err(err) } {
+            return Err(RecordError::Backend(message));
+        }
+        if state.panicked {
+            return Err(RecordError::Backend(
+                "processing a frame failed unexpectedly".into(),
+            ));
+        }
+        if rc != 0 {
+            return Err(RecordError::Backend("couldn't export that recording".into()));
+        }
+        Ok(())
     }
 
     fn track_offsets(&self, path: &Path) -> RecordResult<Vec<TrackOffsets>> {
@@ -338,6 +425,105 @@ pub(crate) fn bgra_to_rgba(bgra: &[u8], width: u32, height: u32, stride: usize) 
         }
     }
     Some(out)
+}
+
+// -- Callback plumbing ------------------------------------------------------
+//
+// The shim calls back per frame through a plain C function pointer, so the
+// Rust closure travels as an opaque `ctx`. Both trampolines catch panics:
+// unwinding out of these and into Objective-C is undefined behaviour, so a
+// panic is recorded and reported as an error once control is back in Rust.
+
+struct DecodeCtx<'a, 'b> {
+    on_frame: &'a mut (dyn FnMut(RgbaFrame) -> bool + 'b),
+    panicked: bool,
+}
+
+struct TranscodeCtx<'a, 'b> {
+    process: &'a mut (dyn FnMut(RgbaFrame) -> Option<RgbaFrame> + 'b),
+    out_w: u32,
+    out_h: u32,
+    panicked: bool,
+}
+
+extern "C" fn decode_trampoline(
+    ctx: *mut c_void,
+    bgra: *const u8,
+    w: u32,
+    h: u32,
+    stride: u32,
+    pts_s: f64,
+) -> bool {
+    let state = unsafe { &mut *(ctx as *mut DecodeCtx) };
+    if state.panicked {
+        return false;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes =
+            unsafe { std::slice::from_raw_parts(bgra, stride as usize * h as usize) };
+        let Some(image) = bgra_to_rgba(bytes, w, h, stride as usize) else {
+            return false;
+        };
+        (state.on_frame)(RgbaFrame {
+            image,
+            pts_ms: (pts_s * 1000.0).max(0.0) as u64,
+        })
+    }));
+    match result {
+        Ok(keep_going) => keep_going,
+        Err(_) => {
+            state.panicked = true;
+            false
+        }
+    }
+}
+
+extern "C" fn transcode_trampoline(
+    ctx: *mut c_void,
+    bgra_in: *const u8,
+    in_w: u32,
+    in_h: u32,
+    in_stride: u32,
+    bgra_out: *mut u8,
+    pts_s_inout: *mut f64,
+) -> bool {
+    let state = unsafe { &mut *(ctx as *mut TranscodeCtx) };
+    if state.panicked {
+        return false;
+    }
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let bytes =
+            unsafe { std::slice::from_raw_parts(bgra_in, in_stride as usize * in_h as usize) };
+        let Some(image) = bgra_to_rgba(bytes, in_w, in_h, in_stride as usize) else {
+            return false;
+        };
+        let pts_ms = unsafe { (*pts_s_inout * 1000.0).max(0.0) as u64 };
+        let Some(frame) = (state.process)(RgbaFrame { image, pts_ms }) else {
+            return false;
+        };
+
+        // The shim's buffer is exactly out_w x out_h and tightly packed; a
+        // frame of any other size would write past it.
+        if frame.image.dimensions() != (state.out_w, state.out_h) {
+            return false;
+        }
+        let out = unsafe {
+            std::slice::from_raw_parts_mut(bgra_out, state.out_w as usize * state.out_h as usize * 4)
+        };
+        for (dst, px) in out.as_chunks_mut::<4>().0.iter_mut().zip(frame.image.pixels()) {
+            let [r, g, b, a] = px.0;
+            dst.copy_from_slice(&[b, g, r, a]);
+        }
+        unsafe { *pts_s_inout = frame.pts_ms as f64 / 1000.0 };
+        true
+    }));
+    match result {
+        Ok(keep) => keep,
+        Err(_) => {
+            state.panicked = true;
+            false
+        }
+    }
 }
 
 /// Frame counter used by the live tests to assert a decode produced frames.
@@ -508,6 +694,134 @@ mod live_tests {
             (300.0 * scale) as u32,
         );
         (rect, primary.id().expect("id"))
+    }
+
+    /// Live: records a few seconds, then decodes and re-encodes a one-second
+    /// slice of it -- the editor's export path end to end.
+    #[test]
+    #[ignore]
+    fn decodes_and_transcodes_a_slice() {
+        let (rect, monitor_id) = live_test_region();
+        let src = temp_path("slickshot-live-transcode-src.mp4");
+        let dst = temp_path("slickshot-live-transcode-out.mp4");
+        let backend = MacBackend;
+
+        let recording = backend
+            .start_recording(&RecordConfig {
+                rect,
+                monitor_id,
+                fps: 30,
+                show_cursor: true,
+                system_audio: true,
+                microphone: false,
+                out_path: src.clone(),
+            })
+            .expect("start");
+        std::thread::sleep(Duration::from_secs(3));
+        let src = recording.stop().expect("stop");
+
+        let before = backend.probe(&src).expect("probe source");
+        println!(
+            "source: {}x{} {}ms audio={}",
+            before.width, before.height, before.duration_ms, before.has_audio
+        );
+
+        // Decode 1.0s-2.0s at 10fps: about ten frames, give or take where the
+        // source's own variable frame timing lands.
+        let range = TimeRange {
+            start_ms: 1_000,
+            end_ms: 2_000,
+        };
+        let mut seen: Vec<u64> = Vec::new();
+        backend
+            .decode_frames(&src, range, 10, &mut |frame| {
+                assert_eq!(
+                    frame.image.dimensions(),
+                    (before.width, before.height),
+                    "decoded frames come back at the source's size"
+                );
+                seen.push(frame.pts_ms);
+                true
+            })
+            .expect("decode");
+        println!("decoded {} frames: {:?}", seen.len(), seen);
+        assert!(
+            (8..=12).contains(&seen.len()),
+            "expected about ten frames at 10fps over one second, got {}",
+            seen.len()
+        );
+
+        // And the callback really can stop the decode early.
+        let mut count = 0;
+        backend
+            .decode_frames(&src, range, 10, &mut |_| {
+                count += 1;
+                count < 3
+            })
+            .expect("decode with early stop");
+        assert_eq!(count, 3, "returning false stops the decode");
+
+        // Identity transcode of the same range.
+        let opts = TranscodeOptions {
+            range,
+            speed: 1.0,
+            crop: None,
+            output: (before.width, before.height),
+            keep_audio: true,
+        };
+        let mut passed = 0;
+        backend
+            .transcode(&src, &dst, &opts, &mut |frame| {
+                passed += 1;
+                Some(frame)
+            })
+            .expect("transcode");
+        println!("transcoded {passed} frames");
+
+        let after = backend.probe(&dst).expect("probe output");
+        println!(
+            "output: {}x{} {}ms audio={} tracks={}",
+            after.width, after.height, after.duration_ms, after.has_audio, after.audio_tracks
+        );
+        assert_eq!(
+            (after.width, after.height),
+            (before.width, before.height),
+            "an identity transcode keeps the size"
+        );
+        assert!(
+            (900..=1_100).contains(&after.duration_ms),
+            "expected about 1000ms, got {}ms",
+            after.duration_ms
+        );
+        assert_eq!(
+            after.has_audio, before.has_audio,
+            "keep_audio should carry the sound across"
+        );
+
+        // Speed: the video side is the callback's job (it halves each PTS),
+        // the audio side is the shim's scaleTimeRange. Both have to land on
+        // the same duration or the export drifts out of sync.
+        let fast = TranscodeOptions {
+            speed: 2.0,
+            ..opts.clone()
+        };
+        backend
+            .transcode(&src, &dst, &fast, &mut |mut frame| {
+                frame.pts_ms /= 2;
+                Some(frame)
+            })
+            .expect("transcode at 2x");
+        let sped = backend.probe(&dst).expect("probe 2x output");
+        println!("2x output: {}ms audio={}", sped.duration_ms, sped.has_audio);
+        assert!(
+            (400..=600).contains(&sped.duration_ms),
+            "2x should halve a 1s slice, got {}ms",
+            sped.duration_ms
+        );
+        assert!(sped.has_audio, "audio survives a speed change");
+
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
     }
 
     /// Live: records with both audio sources and checks the file really has

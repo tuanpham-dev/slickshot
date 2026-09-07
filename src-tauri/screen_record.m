@@ -673,3 +673,543 @@ bool tas_video_poster(const char *src, const char *dst, char **err_out) {
         return true;
     }
 }
+
+// -- Decode and transcode ---------------------------------------------------
+//
+// The editor's export path. Everything that touches pixels (crop, resize,
+// speed, annotation compositing, censor) is Rust in `record/transform.rs`;
+// these two only decode to BGRA, hand each frame over, and re-encode what
+// comes back. That way the interesting work is written and tested once
+// instead of three times, and each platform owns only its media stack.
+
+// Opens a reader over `path`'s video track for `[start_s, end_s)`, configured
+// to hand back plain BGRA. Returns nil and sets the error on failure.
+// `start_s`/`end_s` are in-out: they come back clamped to the asset, so
+// callers pacing their own output know where the range really ends.
+static AVAssetReader *tas_open_video_reader(NSURL *url,
+                                            double *start_s_inout,
+                                            double *end_s_inout,
+                                            AVAssetReaderTrackOutput **out_output,
+                                            CGSize *out_size,
+                                            char **err_out) {
+    double start_s = start_s_inout ? *start_s_inout : 0.0;
+    double end_s = end_s_inout ? *end_s_inout : 0.0;
+    AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+    NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+    if (tracks.count == 0) {
+        tas_set_err(err_out, @"this file has no video track");
+        return nil;
+    }
+    AVAssetTrack *track = tracks.firstObject;
+
+    NSError *error = nil;
+    AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
+    if (!reader) {
+        tas_set_err(err_out, error ? error.localizedDescription : @"couldn't read that movie");
+        return nil;
+    }
+
+    // Clamped to the asset: asking a reader for a range past the end makes it
+    // fail outright rather than simply stopping early.
+    double duration_s = CMTimeGetSeconds(asset.duration);
+    if (end_s <= 0 || end_s > duration_s) {
+        end_s = duration_s;
+    }
+    if (start_s < 0) {
+        start_s = 0;
+    }
+    if (start_s >= end_s) {
+        tas_set_err(err_out, @"that time range is empty");
+        return nil;
+    }
+    if (start_s_inout) {
+        *start_s_inout = start_s;
+    }
+    if (end_s_inout) {
+        *end_s_inout = end_s;
+    }
+    reader.timeRange = CMTimeRangeMake(CMTimeMakeWithSeconds(start_s, 600),
+                                       CMTimeMakeWithSeconds(end_s - start_s, 600));
+
+    AVAssetReaderTrackOutput *output = [AVAssetReaderTrackOutput
+        assetReaderTrackOutputWithTrack:track
+                         outputSettings:@{
+                             (id)kCVPixelBufferPixelFormatTypeKey:
+                                 @(kCVPixelFormatType_32BGRA)
+                         }];
+    output.alwaysCopiesSampleData = NO;
+    if (![reader canAddOutput:output]) {
+        tas_set_err(err_out, @"couldn't decode that movie's video");
+        return nil;
+    }
+    [reader addOutput:output];
+
+    if (out_size) {
+        CGSize natural = CGSizeApplyAffineTransform(track.naturalSize, track.preferredTransform);
+        *out_size = CGSizeMake(fabs(natural.width), fabs(natural.height));
+    }
+    if (out_output) {
+        *out_output = output;
+    }
+    return reader;
+}
+
+// Decodes `[start_s, end_s)` at roughly `fps`, handing each frame to
+// `on_frame` as BGRA. Returning false from the callback stops the decode
+// early. Returns 0 on success, -1 on error.
+int tas_video_decode(const char *path,
+                     double start_s,
+                     double end_s,
+                     uint32_t fps,
+                     void *ctx,
+                     bool (*on_frame)(void *ctx,
+                                      const uint8_t *bgra,
+                                      uint32_t w,
+                                      uint32_t h,
+                                      uint32_t stride,
+                                      double pts_s),
+                     char **err_out) {
+    if (err_out) {
+        *err_out = NULL;
+    }
+    if (!on_frame) {
+        tas_set_err(err_out, @"no frame callback was given");
+        return -1;
+    }
+    @autoreleasepool {
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        AVAssetReaderTrackOutput *output = nil;
+        AVAssetReader *reader =
+            tas_open_video_reader(url, &start_s, &end_s, &output, NULL, err_out);
+        if (!reader) {
+            return -1;
+        }
+        if (![reader startReading]) {
+            tas_set_err(err_out, reader.error ? reader.error.localizedDescription
+                                              : @"couldn't start decoding");
+            return -1;
+        }
+
+        // Frames come out on an even 1/fps grid, and the most recent decoded
+        // frame is held across gaps in the source.
+        //
+        // That last part matters more than it sounds: a screen recording is
+        // never constant-rate, because ScreenCaptureKit only emits a frame
+        // when something actually changes. A still region can go half a second
+        // without producing one. Handing those gaps to the caller would make
+        // every fps-based export -- a GIF above all -- come out short and
+        // unevenly paced, so a still stretch yields repeated frames instead of
+        // no frames.
+        double interval = fps > 0 ? 1.0 / (double)fps : 0.0;
+        double clamped_start = start_s > 0 ? start_s : 0.0;
+        double next_slot = clamped_start;
+        bool keep_going = true;
+
+        // __block, or the block below captures the initial NULL by value and
+        // silently never emits anything.
+        __block CVPixelBufferRef held = NULL;
+        // Emits `held` at `at_s`; returns what the callback said.
+        bool (^emit)(double) = ^bool(double at_s) {
+            if (!held) {
+                return true;
+            }
+            CVPixelBufferLockBaseAddress(held, kCVPixelBufferLock_ReadOnly);
+            const uint8_t *base = (const uint8_t *)CVPixelBufferGetBaseAddress(held);
+            bool cont = true;
+            if (base) {
+                cont = on_frame(ctx, base, (uint32_t)CVPixelBufferGetWidth(held),
+                                (uint32_t)CVPixelBufferGetHeight(held),
+                                (uint32_t)CVPixelBufferGetBytesPerRow(held), at_s);
+            }
+            CVPixelBufferUnlockBaseAddress(held, kCVPixelBufferLock_ReadOnly);
+            return cont;
+        };
+
+        CMSampleBufferRef sample = NULL;
+        while (keep_going && (sample = [output copyNextSampleBuffer])) {
+            CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+            double pts_s = CMTIME_IS_NUMERIC(pts) ? CMTimeGetSeconds(pts) : 0.0;
+            CVImageBufferRef image = CMSampleBufferGetImageBuffer(sample);
+
+            if (image) {
+                // Fill every slot this new frame has moved past, using the
+                // frame that was on screen for them -- the previous one.
+                if (interval > 0) {
+                    while (keep_going && next_slot + 1e-9 < pts_s) {
+                        keep_going = emit(next_slot);
+                        next_slot += interval;
+                    }
+                }
+                if (held) {
+                    CVPixelBufferRelease(held);
+                }
+                held = CVPixelBufferRetain(image);
+                if (interval <= 0) {
+                    // No pacing asked for: hand over every source frame.
+                    keep_going = emit(pts_s);
+                }
+            }
+            CFRelease(sample);
+            sample = NULL;
+        }
+
+        // And the tail: slots between the last source frame and the end of the
+        // range, which a recording that ends on a still screen always has.
+        if (keep_going && interval > 0 && held) {
+            double stop = end_s > clamped_start ? end_s : clamped_start;
+            while (keep_going && next_slot + 1e-9 < stop) {
+                keep_going = emit(next_slot);
+                next_slot += interval;
+            }
+        }
+        if (held) {
+            CVPixelBufferRelease(held);
+        }
+
+        // A caller-requested stop is not a failure; only the reader saying so is.
+        if (keep_going && reader.status == AVAssetReaderStatusFailed) {
+            tas_set_err(err_out, reader.error ? reader.error.localizedDescription
+                                              : @"decoding failed part-way through");
+            return -1;
+        }
+        [reader cancelReading];
+        return 0;
+    }
+}
+
+// Builds the trimmed, speed-scaled audio for a transcode, as a reader over an
+// AVMutableComposition. `speed` > 1 shortens it. Returns nil when there is no
+// audio to carry over, which is not an error.
+static AVAssetReader *tas_build_audio_reader(AVURLAsset *asset,
+                                             double start_s,
+                                             double end_s,
+                                             double speed,
+                                             AVAssetReaderAudioMixOutput **out_output) {
+    NSArray<AVAssetTrack *> *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+    if (audioTracks.count == 0) {
+        return nil;
+    }
+
+    AVMutableComposition *composition = [AVMutableComposition composition];
+    CMTimeRange range = CMTimeRangeMake(CMTimeMakeWithSeconds(start_s, 600),
+                                        CMTimeMakeWithSeconds(end_s - start_s, 600));
+    NSMutableArray<AVAssetTrack *> *composed = [NSMutableArray array];
+    for (AVAssetTrack *track in audioTracks) {
+        AVMutableCompositionTrack *dest =
+            [composition addMutableTrackWithMediaType:AVMediaTypeAudio
+                                     preferredTrackID:kCMPersistentTrackID_Invalid];
+        NSError *error = nil;
+        if (![dest insertTimeRange:range ofTrack:track atTime:kCMTimeZero error:&error]) {
+            continue;
+        }
+        [composed addObject:dest];
+    }
+    if (composed.count == 0) {
+        return nil;
+    }
+
+    // Time-stretch rather than resample: scaleTimeRange pitch-corrects through
+    // the audio mix's algorithm, so 2x playback still sounds like speech and
+    // not like a chipmunk.
+    if (speed > 0 && fabs(speed - 1.0) > 1e-6) {
+        CMTimeRange whole = CMTimeRangeMake(kCMTimeZero, composition.duration);
+        [composition scaleTimeRange:whole
+                         toDuration:CMTimeMultiplyByFloat64(composition.duration, 1.0 / speed)];
+    }
+
+    NSError *error = nil;
+    AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:composition error:&error];
+    if (!reader) {
+        return nil;
+    }
+
+    AVMutableAudioMix *mix = [AVMutableAudioMix audioMix];
+    NSMutableArray<AVAudioMixInputParameters *> *params = [NSMutableArray array];
+    for (AVAssetTrack *track in composed) {
+        AVMutableAudioMixInputParameters *p =
+            [AVMutableAudioMixInputParameters audioMixInputParametersWithTrack:track];
+        p.audioTimePitchAlgorithm = AVAudioTimePitchAlgorithmSpectral;
+        [params addObject:p];
+    }
+    mix.inputParameters = params;
+
+    // Mixed down to one stereo track: the output is a single AAC track, and
+    // this is where two recorded sources (system + mic) become one.
+    AVAssetReaderAudioMixOutput *output = [AVAssetReaderAudioMixOutput
+        assetReaderAudioMixOutputWithAudioTracks:composed
+                                   audioSettings:@{
+                                       AVFormatIDKey: @(kAudioFormatLinearPCM),
+                                       AVLinearPCMBitDepthKey: @16,
+                                       AVLinearPCMIsFloatKey: @NO,
+                                       AVLinearPCMIsBigEndianKey: @NO,
+                                       AVLinearPCMIsNonInterleaved: @NO,
+                                       AVSampleRateKey: @48000,
+                                       AVNumberOfChannelsKey: @2,
+                                   }];
+    output.audioMix = mix;
+    if (![reader canAddOutput:output]) {
+        return nil;
+    }
+    [reader addOutput:output];
+    if (out_output) {
+        *out_output = output;
+    }
+    return reader;
+}
+
+// Re-encodes `[start_s, end_s)` of `src` into `dst`.
+//
+// Every decoded frame goes to `process`, which fills `bgra_out` (always
+// out_w x out_h, tightly packed) and may rewrite the PTS, or return false to
+// drop the frame -- that is how crop, resize, speed, compositing and censoring
+// reach the output without any of them living here. Returns 0, or -1 on error.
+int tas_video_transcode(const char *src,
+                        const char *dst,
+                        double start_s,
+                        double end_s,
+                        double speed,
+                        uint32_t out_w,
+                        uint32_t out_h,
+                        bool keep_audio,
+                        void *ctx,
+                        bool (*process)(void *ctx,
+                                        const uint8_t *bgra_in,
+                                        uint32_t in_w,
+                                        uint32_t in_h,
+                                        uint32_t in_stride,
+                                        uint8_t *bgra_out,
+                                        double *pts_s_inout),
+                        char **err_out) {
+    if (err_out) {
+        *err_out = NULL;
+    }
+    if (!process) {
+        tas_set_err(err_out, @"no frame callback was given");
+        return -1;
+    }
+    if (out_w < 2 || out_h < 2) {
+        tas_set_err(err_out, @"the output size is too small");
+        return -1;
+    }
+    @autoreleasepool {
+        NSURL *srcURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:src]];
+        NSURL *dstURL = [NSURL fileURLWithPath:[NSString stringWithUTF8String:dst]];
+        [[NSFileManager defaultManager] removeItemAtURL:dstURL error:nil];
+
+        AVAssetReaderTrackOutput *videoOut = nil;
+        double clamped_start = start_s;
+        double clamped_end = end_s;
+        AVAssetReader *videoReader = tas_open_video_reader(srcURL, &clamped_start, &clamped_end,
+                                                           &videoOut, NULL, err_out);
+        if (!videoReader) {
+            return -1;
+        }
+
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:srcURL options:nil];
+
+        AVAssetReaderAudioMixOutput *audioOut = nil;
+        AVAssetReader *audioReader =
+            keep_audio ? tas_build_audio_reader(asset, clamped_start, clamped_end, speed, &audioOut)
+                       : nil;
+
+        NSError *error = nil;
+        AVAssetWriter *writer = [[AVAssetWriter alloc] initWithURL:dstURL
+                                                          fileType:AVFileTypeMPEG4
+                                                             error:&error];
+        if (!writer) {
+            tas_set_err(err_out, error ? error.localizedDescription : @"couldn't create the export");
+            return -1;
+        }
+
+        size_t even_w = tas_even(out_w);
+        size_t even_h = tas_even(out_h);
+        AVAssetWriterInput *videoIn = [AVAssetWriterInput
+            assetWriterInputWithMediaType:AVMediaTypeVideo
+                           outputSettings:@{
+                               AVVideoCodecKey: AVVideoCodecTypeH264,
+                               AVVideoWidthKey: @(even_w),
+                               AVVideoHeightKey: @(even_h),
+                           }];
+        videoIn.expectsMediaDataInRealTime = NO;
+        AVAssetWriterInputPixelBufferAdaptor *adaptor = [AVAssetWriterInputPixelBufferAdaptor
+            assetWriterInputPixelBufferAdaptorWithAssetWriterInput:videoIn
+                                       sourcePixelBufferAttributes:@{
+                                           (id)kCVPixelBufferPixelFormatTypeKey:
+                                               @(kCVPixelFormatType_32BGRA),
+                                           (id)kCVPixelBufferWidthKey: @(even_w),
+                                           (id)kCVPixelBufferHeightKey: @(even_h),
+                                       }];
+        if (![writer canAddInput:videoIn]) {
+            tas_set_err(err_out, @"couldn't set up the export's video");
+            return -1;
+        }
+        [writer addInput:videoIn];
+
+        AVAssetWriterInput *audioIn = nil;
+        if (audioReader) {
+            AudioChannelLayout layout = {0};
+            layout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo;
+            audioIn = [AVAssetWriterInput
+                assetWriterInputWithMediaType:AVMediaTypeAudio
+                               outputSettings:@{
+                                   AVFormatIDKey: @(kAudioFormatMPEG4AAC),
+                                   AVSampleRateKey: @48000,
+                                   AVNumberOfChannelsKey: @2,
+                                   AVEncoderBitRateKey: @128000,
+                                   AVChannelLayoutKey: [NSData dataWithBytes:&layout
+                                                                      length:sizeof(layout)],
+                               }];
+            audioIn.expectsMediaDataInRealTime = NO;
+            if ([writer canAddInput:audioIn]) {
+                [writer addInput:audioIn];
+            } else {
+                audioIn = nil;
+                audioReader = nil;
+            }
+        }
+
+        if (![writer startWriting]) {
+            tas_set_err(err_out, writer.error ? writer.error.localizedDescription
+                                              : @"couldn't start the export");
+            return -1;
+        }
+        [writer startSessionAtSourceTime:kCMTimeZero];
+        if (![videoReader startReading]) {
+            tas_set_err(err_out, videoReader.error ? videoReader.error.localizedDescription
+                                                   : @"couldn't start decoding");
+            [writer cancelWriting];
+            return -1;
+        }
+        if (audioReader && ![audioReader startReading]) {
+            audioReader = nil;
+            audioIn = nil;
+        }
+
+        // One reusable destination buffer: the callback writes a full
+        // out_w x out_h BGRA frame into it every time.
+        size_t out_stride = even_w * 4;
+        uint8_t *scratch = calloc(out_stride * even_h, 1);
+        if (!scratch) {
+            tas_set_err(err_out, @"couldn't allocate the export buffer");
+            [writer cancelWriting];
+            return -1;
+        }
+
+        __block bool failed = false;
+        __block NSString *failure = nil;
+
+        dispatch_semaphore_t done = dispatch_semaphore_create(0);
+        dispatch_queue_t videoQueue =
+            dispatch_queue_create("dev.tuanp.slickshot.transcode.video", DISPATCH_QUEUE_SERIAL);
+
+        [videoIn requestMediaDataWhenReadyOnQueue:videoQueue usingBlock:^{
+            while (videoIn.isReadyForMoreMediaData) {
+                CMSampleBufferRef sample = [videoOut copyNextSampleBuffer];
+                if (!sample) {
+                    [videoIn markAsFinished];
+                    dispatch_semaphore_signal(done);
+                    return;
+                }
+                @autoreleasepool {
+                    CMTime pts = CMSampleBufferGetPresentationTimeStamp(sample);
+                    double pts_s = CMTIME_IS_NUMERIC(pts) ? CMTimeGetSeconds(pts) : 0.0;
+                    // Output time is measured from the trim's start, so an
+                    // export beginning at 4s starts at zero, not at four.
+                    double out_pts = pts_s - clamped_start;
+                    if (out_pts < 0) {
+                        out_pts = 0;
+                    }
+
+                    CVImageBufferRef image = CMSampleBufferGetImageBuffer(sample);
+                    bool keep = false;
+                    if (image) {
+                        CVPixelBufferLockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
+                        const uint8_t *base =
+                            (const uint8_t *)CVPixelBufferGetBaseAddress(image);
+                        if (base) {
+                            keep = process(ctx, base, (uint32_t)CVPixelBufferGetWidth(image),
+                                           (uint32_t)CVPixelBufferGetHeight(image),
+                                           (uint32_t)CVPixelBufferGetBytesPerRow(image), scratch,
+                                           &out_pts);
+                        }
+                        CVPixelBufferUnlockBaseAddress(image, kCVPixelBufferLock_ReadOnly);
+                    }
+
+                    if (keep) {
+                        CVPixelBufferRef out = NULL;
+                        CVReturn rc = CVPixelBufferPoolCreatePixelBuffer(
+                            kCFAllocatorDefault, adaptor.pixelBufferPool, &out);
+                        if (rc == kCVReturnSuccess && out) {
+                            CVPixelBufferLockBaseAddress(out, 0);
+                            uint8_t *dstBase = (uint8_t *)CVPixelBufferGetBaseAddress(out);
+                            size_t dstStride = CVPixelBufferGetBytesPerRow(out);
+                            for (size_t y = 0; y < even_h; y++) {
+                                memcpy(dstBase + y * dstStride, scratch + y * out_stride,
+                                       out_stride);
+                            }
+                            CVPixelBufferUnlockBaseAddress(out, 0);
+                            if (![adaptor appendPixelBuffer:out
+                                       withPresentationTime:CMTimeMakeWithSeconds(out_pts, 600)]) {
+                                failed = true;
+                                failure = @"the export's encoder rejected a frame";
+                            }
+                            CVPixelBufferRelease(out);
+                        }
+                    }
+                }
+                CFRelease(sample);
+
+                if (failed) {
+                    [videoIn markAsFinished];
+                    dispatch_semaphore_signal(done);
+                    return;
+                }
+            }
+        }];
+
+        dispatch_semaphore_t audioDone = dispatch_semaphore_create(0);
+        if (audioReader && audioIn) {
+            dispatch_queue_t audioQueue =
+                dispatch_queue_create("dev.tuanp.slickshot.transcode.audio", DISPATCH_QUEUE_SERIAL);
+            [audioIn requestMediaDataWhenReadyOnQueue:audioQueue usingBlock:^{
+                while (audioIn.isReadyForMoreMediaData) {
+                    CMSampleBufferRef sample = [audioOut copyNextSampleBuffer];
+                    if (!sample) {
+                        [audioIn markAsFinished];
+                        dispatch_semaphore_signal(audioDone);
+                        return;
+                    }
+                    [audioIn appendSampleBuffer:sample];
+                    CFRelease(sample);
+                }
+            }];
+        } else {
+            dispatch_semaphore_signal(audioDone);
+        }
+
+        dispatch_semaphore_wait(done, DISPATCH_TIME_FOREVER);
+        dispatch_semaphore_wait(audioDone, DISPATCH_TIME_FOREVER);
+        free(scratch);
+
+        if (failed) {
+            [writer cancelWriting];
+            tas_set_err(err_out, failure ?: @"the export failed");
+            return -1;
+        }
+
+        __block bool finished = false;
+        dispatch_semaphore_t writerDone = dispatch_semaphore_create(0);
+        [writer finishWritingWithCompletionHandler:^{
+            finished = writer.status == AVAssetWriterStatusCompleted;
+            dispatch_semaphore_signal(writerDone);
+        }];
+        dispatch_semaphore_wait(writerDone, DISPATCH_TIME_FOREVER);
+
+        if (!finished) {
+            tas_set_err(err_out, writer.error ? writer.error.localizedDescription
+                                              : @"the export didn't finish");
+            return -1;
+        }
+        return 0;
+    }
+}
