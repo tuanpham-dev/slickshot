@@ -18,6 +18,20 @@ pub enum ImageFormat {
     Avif,
 }
 
+impl ImageFormat {
+    /// The extension a quicksave/auto-save/CLI-default file gets, so those
+    /// paths transcode through the same by-extension dispatch as an explicit
+    /// `-o file.ext` or editor "Save As" rather than always landing on PNG.
+    pub fn extension(self) -> &'static str {
+        match self {
+            ImageFormat::Png => "png",
+            ImageFormat::Jpg => "jpg",
+            ImageFormat::Webp => "webp",
+            ImageFormat::Avif => "avif",
+        }
+    }
+}
+
 /// What happens once a capture lands. Replaces the older
 /// `open_editor_after_capture` boolean, which is still read from disk for
 /// backfill (see `parse_settings_value`) but no longer drives behavior.

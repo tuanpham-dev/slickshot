@@ -82,8 +82,8 @@ pub fn export_commit(
             if let Some(dir) = path.parent() {
                 std::fs::create_dir_all(dir).map_err(|e| CommandError::Image(e.to_string()))?;
             }
-            std::fs::write(&path, &bytes).map_err(|e| CommandError::Image(e.to_string()))?;
             let saved_path = path.to_string_lossy().into_owned();
+            save_encoded(&bytes, &saved_path, Some(settings.avif_quality))?;
             notify_saved(&app, &saved_path);
             crate::history::record_editor_save(&app, shapes.as_deref(), &saved_path);
             Ok(ExportResult {
@@ -94,10 +94,9 @@ pub fn export_commit(
 }
 
 /// Destination for a quicksave: the configured save dir (or a `Screenshots`
-/// fallback under the platform's Pictures dir) plus a timestamped filename.
-/// Always `.png` -- quicksave has never consulted `default_format`, and this
-/// preserves that existing behavior; used by both `export_commit`'s
-/// `Quicksave` action and the CLI's default (no-flags) output sink.
+/// fallback under the platform's Pictures dir) plus a timestamped filename,
+/// extended per `default_format`. Used by both `export_commit`'s `Quicksave`
+/// action and the CLI's default (no-flags) output sink.
 pub(crate) fn quicksave_file(settings: &crate::settings::Settings) -> std::path::PathBuf {
     let dir = settings
         .save_dir
@@ -108,7 +107,11 @@ pub(crate) fn quicksave_file(settings: &crate::settings::Settings) -> std::path:
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
                 .join("Screenshots")
         });
-    let filename = format!("Screenshot {}.png", filename_timestamp());
+    let filename = format!(
+        "Screenshot {}.{}",
+        filename_timestamp(),
+        settings.default_format.extension()
+    );
     dir.join(filename)
 }
 
@@ -125,8 +128,8 @@ pub(crate) fn autosave_image(
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| CommandError::Image(e.to_string()))?;
     }
-    std::fs::write(&path, crate::images::encode_png(image))
-        .map_err(|e| CommandError::Image(e.to_string()))?;
+    let png_bytes = crate::images::encode_png(image);
+    save_encoded(&png_bytes, &path.to_string_lossy(), Some(settings.avif_quality))?;
     notify_saved(app, &path.to_string_lossy());
     // Central for every shape-less writer that lands here: the overlay's Save
     // button, the quicksave capture mode, and the auto-save that keeps a
