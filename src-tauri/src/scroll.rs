@@ -275,6 +275,12 @@ fn close_control(app: &AppHandle) {
 /// window instead of the content being captured.
 #[tauri::command]
 pub async fn scroll_start(app: AppHandle, rect: PhysRect) -> CommandResult<()> {
+    // Checked first, before anything else here opens a window or moves the
+    // pointer: on macOS this is a silent no-op without Accessibility access,
+    // and finding that out only after the pill was already up read as "it
+    // opened, then just sat on frame one" with no indication why.
+    input::ensure_permitted().map_err(|e| CommandError::Capture(e.to_string()))?;
+
     let session = app.state::<ScrollSession>();
     // A capture that was just cancelled takes a moment to wind down, and the
     // natural thing to do after cancelling one is to start another straight
@@ -355,8 +361,22 @@ pub async fn scroll_start(app: AppHandle, rect: PhysRect) -> CommandResult<()> {
 
     // The pointer has to sit inside the region for wheel events to reach the
     // content, and clear of the control window.
-    input::warp_pointer(rect.x + rect.w as i32 / 2, rect.y + rect.h as i32 / 2)
-        .map_err(|e| CommandError::Capture(e.to_string()))?;
+    //
+    // The point handed to `warp_pointer` is physical, like `rect` and
+    // everywhere else here -- except on macOS, where CGEvent's coordinate
+    // space is logical points. Left unconverted there, the pointer lands
+    // roughly twice as far right and down as intended on a HiDPI display:
+    // generally outside the region, sometimes off-screen, so every wheel
+    // tick goes to whatever happens to be under it instead of the content
+    // being captured, and the capture quietly never scrolls.
+    #[cfg(target_os = "macos")]
+    let (warp_x, warp_y) = (
+        ((rect.x + rect.w as i32 / 2) as f64 / scale).round() as i32,
+        ((rect.y + rect.h as i32 / 2) as f64 / scale).round() as i32,
+    );
+    #[cfg(not(target_os = "macos"))]
+    let (warp_x, warp_y) = (rect.x + rect.w as i32 / 2, rect.y + rect.h as i32 / 2);
+    input::warp_pointer(warp_x, warp_y).map_err(|e| CommandError::Capture(e.to_string()))?;
 
     let app_handle = app.clone();
     std::thread::spawn(move || {

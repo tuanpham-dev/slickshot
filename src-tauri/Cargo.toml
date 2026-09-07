@@ -60,9 +60,11 @@ tauri-plugin-process = "2.3.1"
 gtk = "0.18"
 x11rb = { version = "0.14", features = ["randr", "xtest"] }
 
-# Synthetic wheel events for scrolling capture (capture/input.rs).
+# Synthetic wheel events for scrolling capture (capture/input.rs), and the
+# Accessibility permission check that gates whether those events go anywhere.
 [target.'cfg(target_os = "macos")'.dependencies]
-core-graphics = "0.24"
+core-graphics = { version = "0.24", features = ["highsierra"] }
+core-foundation = "0.10"
 
 # Lets the CLI re-attach to the parent terminal's console on Windows, where
 # `windows_subsystem = "windows"` (main.rs) otherwise leaves stdout/stderr

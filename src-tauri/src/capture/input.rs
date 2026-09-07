@@ -88,6 +88,12 @@ mod platform {
             .map_err(|e| InputError(e.to_string()))?;
         Ok(())
     }
+
+    /// XTest has no separate opt-in permission -- reachability is entirely
+    /// `connect()`'s question, asked again on the first real call anyway.
+    pub fn ensure_permitted() -> InputResult<()> {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -136,14 +142,64 @@ mod platform {
         }
         Ok(())
     }
+
+    /// `SendInput` has no comparable opt-in gate.
+    pub fn ensure_permitted() -> InputResult<()> {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "macos")]
 mod platform {
     use super::{InputError, InputResult};
+    use core_foundation::base::TCFType;
+    use core_foundation::boolean::CFBoolean;
+    use core_foundation::dictionary::{CFDictionary, CFDictionaryRef};
+    use core_foundation::string::CFString;
     use core_graphics::event::{CGEvent, CGEventTapLocation, ScrollEventUnit};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
     use core_graphics::geometry::CGPoint;
+
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrustedWithOptions(options: CFDictionaryRef) -> bool;
+    }
+
+    /// Whether this process may control the computer -- required before a
+    /// CGEvent posted at `CGEventTapLocation::HID` reaches another app.
+    /// Without it, `CGEventPost` neither errors nor does anything: the first
+    /// captured frame is the only one there will ever be, and nothing says
+    /// why. `prompt` additionally raises the system's own permission dialog
+    /// and lists SlickShot in Accessibility (unchecked) the first time.
+    fn accessibility_trusted(prompt: bool) -> bool {
+        unsafe {
+            if !prompt {
+                return AXIsProcessTrustedWithOptions(std::ptr::null());
+            }
+            let key = CFString::from_static_string("AXTrustedCheckOptionPrompt");
+            let options = CFDictionary::from_CFType_pairs(&[(key, CFBoolean::true_value())]);
+            AXIsProcessTrustedWithOptions(options.as_concrete_TypeRef())
+        }
+    }
+
+    /// Fails fast, before a scrolling capture opens any window or moves the
+    /// pointer, when this process cannot post synthetic input -- one clear
+    /// error up front instead of a capture that silently never scrolls past
+    /// frame one.
+    pub fn ensure_permitted() -> InputResult<()> {
+        if accessibility_trusted(false) {
+            return Ok(());
+        }
+        // Also surfaces the system's own prompt, so this is the user's cue to
+        // go grant it rather than a dead end.
+        accessibility_trusted(true);
+        Err(InputError(
+            "scrolling capture needs Accessibility access to scroll the page for you -- \
+             turn it on for SlickShot in System Settings \u{2192} Privacy & Security \u{2192} \
+             Accessibility, then try again"
+                .into(),
+        ))
+    }
 
     fn source() -> InputResult<CGEventSource> {
         CGEventSource::new(CGEventSourceStateID::HIDSystemState)
@@ -182,6 +238,16 @@ mod platform {
     pub fn wheel_down(_steps: u32) -> InputResult<()> {
         Err(InputError("scrolling capture isn't supported on this platform".into()))
     }
+    pub fn ensure_permitted() -> InputResult<()> {
+        Err(InputError("scrolling capture isn't supported on this platform".into()))
+    }
+}
+
+/// Checked once, before a scrolling capture touches anything else, so a
+/// missing OS permission (macOS Accessibility) surfaces as one clear error
+/// instead of a capture that quietly never scrolls.
+pub fn ensure_permitted() -> InputResult<()> {
+    platform::ensure_permitted()
 }
 
 /// Moves the pointer so wheel events land on the content being captured.
