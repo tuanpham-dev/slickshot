@@ -9,7 +9,7 @@ import { Switch } from "../ui/Switch";
 import { Field, Input } from "../ui/Field";
 import { Button } from "../ui/Button";
 import { ShortcutRecorder } from "../ui/ShortcutRecorder";
-import { historyClear } from "../lib/ipc";
+import { historyClear, isMac } from "../lib/ipc";
 import { OVERLAY_TOOLS } from "../overlay/tools";
 import { ConfirmDialog } from "../ui/Dialog";
 import { useToast } from "../ui/Toast";
@@ -46,6 +46,7 @@ const MODE_LABELS: Record<CaptureMode, string> = {
   measure: "Measure",
   region_quicksave: "Region to file",
   scroll: "Scrolling capture",
+  record: "Record screen",
 };
 
 const TARGET_LANGUAGES: { value: string; label: string }[] = [
@@ -366,6 +367,92 @@ export function Settings({ onBack }: { onBack: () => void }) {
         </section>
 
         <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
+          <h2 className="text-sm font-semibold text-[var(--fg)]">Recording</h2>
+          <Field label="Frame rate">
+            <Segmented
+              fullWidth
+              options={[
+                { value: "15", label: "15 fps" },
+                { value: "30", label: "30 fps" },
+                { value: "60", label: "60 fps" },
+              ]}
+              value={String(settings.record_fps)}
+              onChange={(v) => update({ record_fps: Number(v) })}
+            />
+          </Field>
+          <div className="flex items-center justify-between">
+            <div className="flex flex-col">
+              <span className="text-sm text-[var(--fg)]">Show the pointer</span>
+              <span className="text-xs text-[var(--fg-muted)]">
+                Draws the cursor into the recording.
+              </span>
+            </div>
+            <Switch
+              aria-label="Show the pointer"
+              checked={settings.record_show_cursor}
+              onChange={(v) => update({ record_show_cursor: v })}
+            />
+          </div>
+          {isMac && (
+            <>
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-sm text-[var(--fg)]">Capture system audio</span>
+                  <span className="text-xs text-[var(--fg-muted)]">
+                    Records what the machine is playing. Toggleable per recording.
+                  </span>
+                </div>
+                <Switch
+                  aria-label="Capture system audio"
+                  checked={settings.record_system_audio}
+                  onChange={(v) => update({ record_system_audio: v })}
+                />
+              </div>
+              <div className="flex items-center justify-between">
+                <div className="flex flex-col">
+                  <span className="text-sm text-[var(--fg)]">Capture microphone</span>
+                  <span className="text-xs text-[var(--fg-muted)]">
+                    Needs Microphone permission the first time.
+                  </span>
+                </div>
+                <Switch
+                  aria-label="Capture microphone"
+                  checked={settings.record_microphone}
+                  onChange={(v) => update({ record_microphone: v })}
+                />
+              </div>
+            </>
+          )}
+          {!isMac && (
+            <p className="text-xs text-[var(--fg-muted)]">
+              Audio capture is macOS-only for now; recordings are video-only here.
+            </p>
+          )}
+          <Field label="GIF export">
+            <div className="flex items-center gap-2">
+              <Input
+                type="number"
+                min={5}
+                max={30}
+                aria-label="GIF frame rate"
+                value={settings.gif_fps}
+                onChange={(e) => update({ gif_fps: Number(e.currentTarget.value) })}
+              />
+              <span className="text-xs text-[var(--fg-muted)] whitespace-nowrap">fps, max</span>
+              <Input
+                type="number"
+                min={160}
+                max={1920}
+                aria-label="GIF maximum width"
+                value={settings.gif_max_width}
+                onChange={(e) => update({ gif_max_width: Number(e.currentTarget.value) })}
+              />
+              <span className="text-xs text-[var(--fg-muted)] whitespace-nowrap">px wide</span>
+            </div>
+          </Field>
+        </section>
+
+        <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
           <h2 className="text-sm font-semibold text-[var(--fg)]">History</h2>
           <div className="flex items-center justify-between">
             <div className="flex flex-col">
@@ -380,6 +467,19 @@ export function Settings({ onBack }: { onBack: () => void }) {
               onChange={(v) => update({ capture_history: v })}
             />
           </div>
+          <Field label="Recordings kept">
+            <Input
+              type="number"
+              min={1}
+              max={100}
+              aria-label="Recordings kept"
+              value={settings.history_video_limit}
+              onChange={(e) => update({ history_video_limit: Number(e.currentTarget.value) })}
+            />
+          </Field>
+          <p className="text-xs text-[var(--fg-muted)]">
+            Counted separately from screenshots, since each recording is far larger.
+          </p>
           <div className="flex items-center justify-between">
             <span className="text-sm text-[var(--fg)]">Clear capture history</span>
             <Button variant="secondary" size="sm" onClick={() => setClearHistoryOpen(true)}>

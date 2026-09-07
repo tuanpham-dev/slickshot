@@ -17,6 +17,19 @@ const MAX_HISTORY: usize = 100;
 /// small enough that a hundred of them decode without a stutter.
 const THUMB_MAX: u32 = 320;
 
+/// What an entry holds. Defaulted to `Image` so an index written by any
+/// build before recording existed still parses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EntryKind {
+    Image,
+    Video,
+}
+
+fn default_kind() -> EntryKind {
+    EntryKind::Image
+}
+
 /// One saved capture. The index carries only what the gallery needs to draw a
 /// card; the pixels and any annotations live beside it on disk, keyed by `id`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,6 +44,11 @@ pub struct HistoryEntry {
     pub has_shapes: bool,
     pub created_at: String,
     pub updated_at: String,
+    #[serde(default = "default_kind")]
+    pub kind: EntryKind,
+    /// Recordings only: how long the clip runs, for the card's badge.
+    #[serde(default)]
+    pub duration_ms: Option<u64>,
 }
 
 fn history_dir(app: &AppHandle) -> CommandResult<PathBuf> {
@@ -55,10 +73,19 @@ fn shapes_path(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.shapes.json"))
 }
 
+pub(crate) fn video_path(dir: &Path, id: &str) -> PathBuf {
+    dir.join(format!("{id}.mp4"))
+}
+
 /// Deletes every file an entry owns. Best-effort per file: a missing one is
 /// the desired end state anyway, and one failure must not strand the others.
 fn remove_files(dir: &Path, id: &str) {
-    for path in [image_path(dir, id), thumb_path(dir, id), shapes_path(dir, id)] {
+    for path in [
+        image_path(dir, id),
+        thumb_path(dir, id),
+        shapes_path(dir, id),
+        video_path(dir, id),
+    ] {
         let _ = std::fs::remove_file(path);
     }
 }
@@ -161,15 +188,48 @@ fn upsert(
         has_shapes: shapes_json.is_some_and(|j| !j.is_empty()),
         created_at,
         updated_at: now,
+        kind: EntryKind::Image,
+        duration_ms: None,
     };
 
     entries.retain(|e| e.id != id);
     entries.insert(0, entry);
 
-    for evicted in entries.split_off(entries.len().min(MAX_HISTORY)) {
+    for evicted in evict(&mut entries, video_limit(app)) {
         remove_files(&dir, &evicted.id);
     }
     write_index(app, &entries)
+}
+
+fn video_limit(app: &AppHandle) -> usize {
+    crate::settings::get_settings(app.clone())
+        .map(|s| s.history_video_limit as usize)
+        .unwrap_or(20)
+}
+
+/// Trims the index to its per-kind caps, returning what was dropped.
+///
+/// Counted separately because the two kinds cost wildly different amounts of
+/// disk: a hundred PNGs is a few hundred megabytes, a hundred MP4s is
+/// several gigabytes. One shared cap would let a run of recordings evict
+/// every screenshot the user had kept, or vice versa.
+fn evict(entries: &mut Vec<HistoryEntry>, video_limit: usize) -> Vec<HistoryEntry> {
+    let (mut images, mut videos) = (0usize, 0usize);
+    let mut dropped = Vec::new();
+    entries.retain(|e| {
+        let (count, limit) = match e.kind {
+            EntryKind::Image => (&mut images, MAX_HISTORY),
+            EntryKind::Video => (&mut videos, video_limit),
+        };
+        *count += 1;
+        if *count > limit {
+            dropped.push(e.clone());
+            false
+        } else {
+            true
+        }
+    });
+    dropped
 }
 
 /// Records a capture that was written straight to a file with no annotation
@@ -184,6 +244,62 @@ pub fn record_saved_file(app: &AppHandle, image: &RgbaImage, saved_path: &str) {
     if let Err(e) = upsert(app, None, image, None, saved_path) {
         eprintln!("[history] couldn't record {saved_path}: {e}");
     }
+}
+
+/// Records a recording the user kept. The MP4 is copied into the history
+/// directory rather than referenced in place, for the same reason images are:
+/// the copy in the save folder is the user's to move or delete, and reopening
+/// an entry has to keep working when they do.
+///
+/// Best-effort, like `record_saved_file` -- a history failure must not fail
+/// the save itself.
+pub fn record_saved_video(app: &AppHandle, saved_path: &Path) {
+    if !history_enabled(app) {
+        return;
+    }
+    if let Err(e) = upsert_video(app, saved_path) {
+        eprintln!("[history] couldn't record {}: {e}", saved_path.display());
+    }
+}
+
+fn upsert_video(app: &AppHandle, saved_path: &Path) -> CommandResult<()> {
+    let dir = history_dir(app)?;
+    let mut entries = read_index(app)?;
+    let id = uuid::Uuid::new_v4().to_string();
+
+    let backend = crate::record::default_backend();
+    let info = backend
+        .probe(saved_path)
+        .map_err(|e| CommandError::Image(e.to_string()))?;
+
+    std::fs::copy(saved_path, video_path(&dir, &id))
+        .map_err(|e| CommandError::Image(e.to_string()))?;
+    // A poster is what makes the card recognisable; a recording without one
+    // is still worth keeping, so this failing is not fatal.
+    if let Err(e) = backend.poster(saved_path, &thumb_path(&dir, &id)) {
+        eprintln!("[history] no thumbnail for {}: {e}", saved_path.display());
+    }
+
+    let now = now_iso();
+    entries.insert(
+        0,
+        HistoryEntry {
+            id,
+            saved_path: saved_path.to_string_lossy().into_owned(),
+            width: info.width,
+            height: info.height,
+            has_shapes: false,
+            created_at: now.clone(),
+            updated_at: now,
+            kind: EntryKind::Video,
+            duration_ms: Some(info.duration_ms),
+        },
+    );
+
+    for evicted in evict(&mut entries, video_limit(app)) {
+        remove_files(&dir, &evicted.id);
+    }
+    write_index(app, &entries)
 }
 
 /// Records an export from the editor, keeping the base image and the shapes
@@ -261,6 +377,24 @@ pub fn history_clear(app: AppHandle) -> CommandResult<()> {
 #[tauri::command]
 pub async fn history_open_in_editor(app: AppHandle, id: String) -> CommandResult<()> {
     let dir = history_dir(&app)?;
+
+    // Recordings open in their own editor, and carry no shapes to restore --
+    // annotations on a video are applied at export, not stored with it.
+    let is_video = read_index(&app)?
+        .iter()
+        .find(|e| e.id == id)
+        .map(|e| e.kind == EntryKind::Video)
+        .unwrap_or(false);
+    if is_video {
+        let path = video_path(&dir, &id);
+        if !path.exists() {
+            return Err(CommandError::Image(
+                "this recording's file is gone".into(),
+            ));
+        }
+        return crate::video::open_editor(&app, &path).await;
+    }
+
     let bytes = std::fs::read(image_path(&dir, &id))
         .map_err(|e| CommandError::Image(format!("this capture's file is gone: {e}")))?;
     let image = image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
@@ -286,6 +420,68 @@ mod tests {
 
     fn solid(w: u32, h: u32) -> RgbaImage {
         RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]))
+    }
+
+    fn entry(id: &str, kind: EntryKind) -> HistoryEntry {
+        HistoryEntry {
+            id: id.into(),
+            saved_path: format!("/tmp/{id}"),
+            width: 100,
+            height: 100,
+            has_shapes: false,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            kind,
+            duration_ms: None,
+        }
+    }
+
+    /// The two kinds are capped separately, so a run of recordings can't
+    /// evict screenshots the user meant to keep (or the reverse).
+    #[test]
+    fn videos_evict_against_their_own_limit() {
+        let mut entries: Vec<HistoryEntry> = (0..21)
+            .map(|i| entry(&format!("v{i}"), EntryKind::Video))
+            .chain((0..5).map(|i| entry(&format!("i{i}"), EntryKind::Image)))
+            .collect();
+
+        let dropped = evict(&mut entries, 20);
+
+        assert_eq!(dropped.len(), 1, "one video over the limit");
+        assert_eq!(dropped[0].id, "v20", "the oldest video goes");
+        assert_eq!(
+            entries.iter().filter(|e| e.kind == EntryKind::Image).count(),
+            5,
+            "no image is touched"
+        );
+        assert_eq!(entries.iter().filter(|e| e.kind == EntryKind::Video).count(), 20);
+    }
+
+    #[test]
+    fn images_still_evict_at_their_own_cap() {
+        let mut entries: Vec<HistoryEntry> = (0..MAX_HISTORY + 3)
+            .map(|i| entry(&format!("i{i}"), EntryKind::Image))
+            .collect();
+        let dropped = evict(&mut entries, 20);
+        assert_eq!(dropped.len(), 3);
+        assert_eq!(entries.len(), MAX_HISTORY);
+    }
+
+    /// An index written before recording existed has no `kind` field at all.
+    #[test]
+    fn an_entry_without_a_kind_reads_as_an_image() {
+        let row = serde_json::json!({
+            "id": "abc",
+            "saved_path": "/tmp/a.png",
+            "width": 100,
+            "height": 80,
+            "has_shapes": false,
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z"
+        });
+        let entry: HistoryEntry = serde_json::from_value(row).expect("must still deserialize");
+        assert_eq!(entry.kind, EntryKind::Image);
+        assert!(entry.duration_ms.is_none());
     }
 
     #[test]

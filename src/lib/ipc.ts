@@ -12,7 +12,8 @@ export type CaptureMode =
   | "color"
   | "measure"
   | "region_quicksave"
-  | "scroll";
+  | "scroll"
+  | "record";
 
 export interface MonitorInfo {
   id: number;
@@ -174,6 +175,15 @@ export interface AppSettings {
   capture_history: boolean;
   /** Tool ids the capture overlay's quick-tools bar offers, in bar order. */
   overlay_tools: string[];
+  record_fps: number;
+  record_show_cursor: boolean;
+  record_system_audio: boolean;
+  record_microphone: boolean;
+  gif_fps: number;
+  gif_max_width: number;
+  /** Recordings kept in capture history, counted separately from images
+   * because each MP4 is orders of magnitude larger than a screenshot. */
+  history_video_limit: number;
 }
 
 export const getSettings = () => call<AppSettings>("get_settings");
@@ -486,6 +496,10 @@ export interface HistoryEntry {
   has_shapes: boolean;
   created_at: string;
   updated_at: string;
+  /** Absent on entries written before recording existed, hence the default
+   * on the Rust side; treat a missing value as an image. */
+  kind?: "image" | "video";
+  duration_ms?: number | null;
 }
 
 export const historyList = () => call<HistoryEntry[]>("history_list");
@@ -517,6 +531,54 @@ export const scrollCancel = () => call<void>("scroll_cancel");
 export function onScrollProgress(cb: (p: ScrollProgress) => void): Promise<UnlistenFn> {
   return listen<ScrollProgress>("scroll:progress", (e) => cb(e.payload));
 }
+
+/** How long the running recording has been going, for the pill's clock. */
+export interface RecordProgress {
+  elapsed_ms: number;
+}
+
+export const recordStart = (rect: PhysRect, systemAudio: boolean, microphone: boolean) =>
+  call<void>("record_start", { rect, systemAudio, microphone });
+export const recordStop = () => call<void>("record_stop");
+export const recordCancel = () => call<void>("record_cancel");
+
+export function onRecordProgress(cb: (p: RecordProgress) => void): Promise<UnlistenFn> {
+  return listen<RecordProgress>("record:progress", (e) => cb(e.payload));
+}
+
+/** Non-fatal problems worth showing on the pill -- a denied microphone being
+ * the one that matters, since the file otherwise looks fine until it plays. */
+export function onRecordWarning(cb: (message: string) => void): Promise<UnlistenFn> {
+  return listen<string>("record:warning", (e) => cb(e.payload));
+}
+
+export interface VideoInfo {
+  width: number;
+  height: number;
+  duration_ms: number;
+  fps: number;
+  has_audio: boolean;
+}
+
+export const videoProbe = (id: string) => call<VideoInfo>("video_probe", { id });
+export const videoDiscard = (id: string) => call<void>("video_discard", { id });
+export const videoReveal = (id: string) => call<void>("video_reveal", { id });
+
+/** A recording's streaming URL. Its own protocol rather than `slickshot://`
+ * because a <video> needs byte-range requests to seek. */
+export function videoUrl(id: string): string {
+  return convertFileSrc(id, "slickshot-video");
+}
+
+export function onVideoEditorOpen(cb: (id: string) => void): Promise<UnlistenFn> {
+  return listen<string>("video-editor:open", (e) => cb(e.payload));
+}
+
+/** Whether we're running on macOS. Used to hide surfaces that only have a
+ * platform implementation there -- recording's audio toggles, for one. The
+ * user agent is the only signal available inside the webview; Tauri's own
+ * platform API is async and these are needed during render. */
+export const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
 
 export function parseHashRoute(): { route: string; params: URLSearchParams } {
   const hash = window.location.hash.replace(/^#/, "");

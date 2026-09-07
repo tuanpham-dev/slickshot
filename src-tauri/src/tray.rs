@@ -122,6 +122,7 @@ fn capture_label(mode: CaptureMode, translate_enabled: bool) -> &'static str {
         CaptureMode::Measure => "Measure",
         CaptureMode::RegionQuicksave => "Capture region to file",
         CaptureMode::Scroll => "Scrolling capture",
+        CaptureMode::Record => "Record screen",
     }
 }
 
@@ -197,6 +198,14 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         accel_for(&settings.hotkeys, CaptureMode::Scroll),
     )?;
 
+    let capture_record = MenuItem::with_id(
+        app,
+        "capture_record",
+        capture_label(CaptureMode::Record, settings.translate_enabled),
+        true,
+        accel_for(&settings.hotkeys, CaptureMode::Record),
+    )?;
+
     let history = MenuItem::with_id(app, "open_history", "Capture history", true, None::<&str>)?;
     let open_image = MenuItem::with_id(app, "open_image", "Open image…", true, None::<&str>)?;
     let settings_item = MenuItem::with_id(app, "open_settings", "Settings", true, None::<&str>)?;
@@ -210,6 +219,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         (CaptureMode::Color, pick_color.clone()),
         (CaptureMode::Measure, measure.clone()),
         (CaptureMode::Scroll, capture_scroll.clone()),
+        (CaptureMode::Record, capture_record.clone()),
     ])));
 
     // Built empty and filled by `refresh_monitors` below, so there is one
@@ -246,6 +256,7 @@ pub fn setup(app: &AppHandle) -> tauri::Result<()> {
         .item(&monitor_submenu)
         .item(&capture_screen)
         .item(&capture_scroll)
+        .item(&capture_record)
         .item(&capture_ocr)
         .item(&capture_repeat)
         .item(&delay_submenu)
@@ -326,6 +337,7 @@ fn handle_menu_event(app: &AppHandle, event: MenuEvent) {
         "capture_color" => trigger(app, CaptureMode::Color),
         "capture_measure" => trigger(app, CaptureMode::Measure),
         "capture_scroll" => trigger(app, CaptureMode::Scroll),
+        "capture_record" => trigger(app, CaptureMode::Record),
         "open_history" => {
             show_main(app);
             // Same shape as "Settings" above: the window on its own would

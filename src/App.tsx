@@ -9,6 +9,8 @@ import { Overlay } from "./overlay/Overlay";
 import { PinWindow } from "./pin/PinWindow";
 import { Thumbnail } from "./thumbnail/Thumbnail";
 import { ScrollControl } from "./scroll/ScrollControl";
+import { RecordControl } from "./record/RecordControl";
+import { VideoEditor } from "./video/VideoEditor";
 
 function Router() {
   const [{ route, params }, setState] = useState(parseHashRoute());
@@ -28,6 +30,10 @@ function Router() {
       return <PinWindow params={params} />;
     case "scroll":
       return <ScrollControl />;
+    case "record":
+      return <RecordControl params={params} />;
+    case "video-editor":
+      return <VideoEditor params={params} />;
     case "thumbnail":
       return <Thumbnail params={params} />;
     case "kit":

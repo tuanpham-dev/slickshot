@@ -1,0 +1,299 @@
+# Plan: Video capture and video editor
+
+- **Session:** 6d74a303-1824-4ee4-aaab-b152b91c3396
+
+## Goal
+Add screen recording (region / window / monitor / full screen) that writes MP4 in-process on macOS, Windows and Linux -- with system-audio and microphone toggles on macOS -- plus a Video Editor window (trim, crop, speed, resize, burned-in annotations, MP4/GIF export) wired into the main window, tray, hotkeys, CLI, settings and capture history like every other capture mode.
+
+## Approach
+- **Recording is one capture mode.** `CaptureMode::Record` goes through `run_capture` exactly like `Scroll`: freeze the screen, open the overlay in a new `"record"` mode (region drag or window click, same as scroll), and on confirm hand the rect to Rust, which closes the overlays, opens a draggable pill (`record-control`, cloned from the scroll pill) and starts the platform recorder. Stop/Cancel on the pill, Enter/Esc, the Record hotkey pressed again, or a CLI `--duration` end it. Countdown reuses the existing Delay setting -- no second timer.
+- **Recording always produces MP4 (H.264 video, AAC audio).** GIF is an *export* format of the editor, never a recording format, so every platform has exactly one recorder output and one transcoder input.
+- **One `VideoBackend` trait, three platform implementations, Rust owns every pixel transform.** Each platform implements four operations against its native media stack: `start_recording`, `probe`, `decode_frames` (RGBA frames + timestamps into a Rust callback) and `transcode` (decode -> Rust frame callback -> re-encode, with audio passed through untouched when the callback keeps timing). Crop, resize, speed, annotation compositing, censor and GIF encoding are platform-independent Rust in `record/`, so they are written and unit-tested once.
+  - **macOS:** an Objective-C shim `src-tauri/screen_record.m`, built by the existing `build.rs` `cc` step exactly like `vision_ocr.m`, exposing a C ABI. ScreenCaptureKit (`SCStream`, `SCContentFilter` for one display, `sourceRect` for the region, `showsCursor`, `minimumFrameInterval`, `capturesAudio` for system audio) feeds an `AVAssetWriter` (hardware H.264 + AAC). Microphone is an `AVCaptureSession` audio input written to a second AAC track, so it works on every supported macOS version. Decode/transcode use `AVAssetReader`/`AVAssetWriter`. Requires `bundle.macOS.minimumSystemVersion = "13.0"` (system audio capture is macOS 13+); the `Retained<...>` Rust bindings are *not* used -- the shim owns all ObjC objects, the same split as OCR.
+  - **Windows:** frames from `xcap::Monitor::video_recorder()` (already a dependency, `windows/impl_video_recorder.rs`), cropped to the region in Rust, encoded by a Media Foundation `IMFSinkWriter` with the built-in H.264 MFT (RGB32 input; the sink writer inserts the color converter). Decode/transcode use `IMFSourceReader` + `IMFSinkWriter`. Video-only in v1 (audio is macOS-only per the scope decision).
+  - **Linux:** frames from `xcap::Monitor::video_recorder()` (X11 path, matching the rest of the app's X11-only capture), pushed through a GStreamer pipeline via the `gstreamer`/`gstreamer-app` crates: `appsrc (RGBA) ! videoconvert ! <encoder> ! h264parse ! mp4mux ! filesink`, where `<encoder>` is the first of `vaapih264enc`, `x264enc`, `openh264enc` that `ElementFactory::find` reports installed. Decode uses `uridecodebin ! videoconvert ! appsink`. GStreamer is a system library like Tesseract already is on Linux: dev packages in CI, runtime plugin packages in the deb/rpm `depends`, and a runtime availability check surfaced in Settings the same way `ocr_engine_status` reports a missing Tesseract. Video-only in v1.
+- **The Video Editor reuses the image editor's shape system.** A new window (`video-editor`, route `#video-editor`) renders a `<video>` element underneath the existing `Canvas` annotation layer, driven by the existing zustand editor store (a separate window is a separate JS context, so the store is naturally per-editor). The base bitmap `Canvas` needs for pixel-sampling tools is the *paused frame* (`createImageBitmap(videoEl)` on pause/seek). The tool set is restricted to what can be burned in from a static overlay plus per-frame censor: select, rect, ellipse, arrow, line, freehand, text, highlighter, spotlight, marker, stamp, censor (pixelate / solid / blur), insert image, crop. Excluded in v1: magnifier, eyedropper, measure, OCR, backdrop, image adjustments -- each either needs live per-frame pixel sampling or per-frame color math that is out of scope.
+- **Annotations are static across the clip and burned in at export.** The webview flattens all non-censor shapes to a transparent PNG at source resolution (a `transparent: true` option on the existing `flattenToPng`), and Rust alpha-composites it onto every frame after crop and before resize (shape coordinates are in source-pixel space, so cropping first keeps them aligned). Censor shapes are sent separately as rects and applied per frame in Rust, because a censor baked from one paused frame would leak whatever moved underneath it.
+- **Speed changes resample video timestamps; audio follows on macOS, is dropped elsewhere.** On macOS the transcoder builds an `AVMutableComposition` of the trimmed audio, applies `scaleTimeRange:toDuration:` by the speed factor (pitch shifts with speed, as QuickTime does) and re-encodes it to AAC through an `AVAssetReaderAudioMixOutput`. Windows and Linux drop the audio tracks at speed != 1, and their export bar says so next to the speed control when audio is present.
+- **Recordings are served to `<video>` through a Range-capable custom protocol,** `slickshot-video://<id>`, added beside the existing `slickshot://` frame protocol in `images.rs`. Ids map to files the app itself registered (temp recordings, history entries), so nothing under an arbitrary user-chosen save folder is ever exposed. Tauri's asset protocol was rejected because its scope must be static and `save_dir` is user-configurable.
+- **Recordings join capture history as a second entry kind** (`kind: "video"`, serde-defaulted to `"image"` for old index files), with a poster thumbnail and duration; opening one launches the Video Editor. Videos have their own eviction cap, `history_video_limit` (default 20, editable in Settings > History), separate from the 100-image cap, because each MP4 is tens of MB.
+- **After a recording:** `post_capture` `Editor` and `Thumbnail` both open the Video Editor (a video thumbnail surface is out of scope, documented); `None` auto-saves to the save folder as `Recording <timestamp>.mp4` and records history, mirroring `deliver_capture`.
+
+## Architecture
+
+```
+ main window / tray / hotkey / CLI `record`
+            │  CaptureMode::Record
+            ▼
+ run_capture ──► overlay (mode "record") ──confirm(rect, audio flags)──► record_start
+                                                                            │
+              ┌─────────────────────────────────────────────────────────────┤
+              ▼                                                             ▼
+   record-control pill (webview)                          VideoBackend::start_recording
+   elapsed · audio badges · Stop · Cancel                 ┌────────────┬──────────────┬────────────┐
+   record:progress ◄── Rust timer                         │ macOS shim │ Windows MF   │ Linux GSt  │
+              │ record_stop / record_cancel                │ SCK+AVAW   │ xcap+SinkWr  │ xcap+appsrc│
+              ▼                                           └────────────┴──────────────┴────────────┘
+   deliver_recording(path)                                           │ MP4 (H.264 [+AAC]) on disk
+      ├─ post_capture Editor/Thumbnail ──► video-editor window ◄──────┘  served via slickshot-video://
+      ├─ post_capture None ──► autosave to save folder + history(kind=video)
+      └─ CLI sink (-o) ──► move/transcode to the requested path
+                                     │ export (trim, crop, speed, resize, overlay PNG, censor rects)
+                                     ▼
+                     VideoBackend::transcode ─► Rust frame callback (record/transform.rs) ─► MP4
+                     VideoBackend::decode_frames ─► record/gif.rs ─────────────────────────► GIF
+```
+
+- **Components:**
+  - `src-tauri/src/record/mod.rs` -- `VideoBackend` trait, `RecordConfig`, `VideoInfo`, `TranscodeOptions`, `default_backend()`; `record/transform.rs` (crop / resize / speed resampling / overlay compositing / censor, pure functions over `RgbaImage`); `record/gif.rs` (frame-delta GIF encoder over the `gif` + `color_quant` crates already in the tree); `record/pill.rs` (the pill window and `place_control` moved out of `scroll.rs` so both pills share one placement implementation); `record/macos.rs` + `screen_record.m`, `record/windows.rs`, `record/linux.rs`.
+  - `src-tauri/src/recording.rs` -- the session/commands layer (`RecordSession` state, `record_start/stop/cancel`, `record:progress` events, `deliver_recording`, temp-file lifecycle under `app_data_dir/recordings/`).
+  - `src-tauri/src/video.rs` -- `VideoStore` (id -> path), the `slickshot-video://` Range protocol, and the editor commands `video_probe`, `video_export`, `video_quicksave`, `video_copy_file`, `video_discard`.
+  - `src/record/RecordControl.tsx` -- the pill. `src/video/VideoEditor.tsx`, `Timeline.tsx`, `VideoExportBar.tsx`, `videoTools.ts` (tool whitelist + censor-rect extraction), `timeline.ts` (pure trim/clamp math).
+- **Data flow:** the overlay owns the rect until confirm; `RecordSession` (Rust) owns the running recording and its temp path; the editor store owns shapes/crop; `VideoStore` owns which files the webview may stream. Progress and errors travel as Tauri events (`record:progress`, `record:error`, `video:export-progress`), commands are one-shot.
+- **Decisions:**
+  - One `VideoBackend` trait with platform modules over a shared Rust transform layer -- because the user asked for in-process MP4 on all three platforms, and putting crop/speed/compositing in Rust means the three encoders stay thin and the tested logic is written once.
+  - ObjC shim on macOS over `objc2` bindings -- because `vision_ocr.m` already establishes that pattern in this repo, ScreenCaptureKit has no bindings crate in the tree, and delegate-heavy APIs (`SCStreamOutput`, `AVCaptureAudioDataOutput`) are far shorter in ObjC.
+  - Custom Range protocol over Tauri's asset protocol -- because the asset scope is static and the save folder is not.
+  - Static overlay PNG + per-frame censor over a Rust shape renderer -- because the webview's `render()` is the single source of truth for how shapes look; duplicating it in Rust would drift.
+  - GIF as export-only -- because recording straight to GIF would need a second encoder path per platform for a worse file.
+  - Record hotkey toggles (press again to stop) over a second "stop" hotkey mode -- because `HotkeyBinding` maps to `CaptureMode` and a stop is not a capture.
+
+## Files to Change
+- `src-tauri/Cargo.toml` -- add `http-range` (already transitively in tree via tauri) for the video protocol; Linux: `gstreamer`, `gstreamer-app`, `gstreamer-video`; Windows: extend the `windows` crate features with `Win32_Media_MediaFoundation`, `Win32_Graphics_Direct3D11`, `Win32_Graphics_Dxgi_Common`, `Win32_System_Com_StructuredStorage`.
+- `src-tauri/build.rs` -- compile `screen_record.m` and link `ScreenCaptureKit`, `AVFoundation`, `CoreMedia`, `CoreVideo` alongside the existing Vision frameworks.
+- `src-tauri/screen_record.m` (new file) -- ScreenCaptureKit + AVFoundation recorder, probe, decode, transcode; C ABI.
+- `src-tauri/Info.plist` (new file) -- `NSMicrophoneUsageDescription`; Tauri merges it into the bundle automatically.
+- `src-tauri/tauri.conf.json` -- `bundle.macOS.minimumSystemVersion: "13.0"`; CSP `media-src 'self' slickshot-video: http://slickshot-video.localhost`; Linux deb/rpm `depends` gain the GStreamer runtime packages.
+- `src-tauri/capabilities/default.json` -- add windows `record-control` and `video-editor`.
+- `src-tauri/src/record/mod.rs`, `transform.rs`, `gif.rs`, `pill.rs`, `clipboard.rs`, `macos.rs`, `windows.rs`, `linux.rs` (new files) -- as described in Architecture; `clipboard.rs` is the native put-a-file-on-the-clipboard implementation per platform.
+- `src-tauri/src/recording.rs` (new file) -- session, commands, delivery.
+- `src-tauri/src/video.rs` (new file) -- store, Range protocol, editor commands.
+- `src-tauri/src/scroll.rs` -- replace its private pill window code with `record::pill`.
+- `src-tauri/src/commands.rs` -- `CaptureMode::Record`; `run_capture` treats it like `Scroll`.
+- `src-tauri/src/overlay.rs` -- no mode-specific change needed beyond passing the mode through (verified: only `Region` is special-cased at line 135); listed so the pre-flight re-checks that.
+- `src-tauri/src/selection.rs` -- `selection_cancel` also clears `RecordSession`'s pending audio flags.
+- `src-tauri/src/hotkeys.rs` -- default binding for `Record` (unbound); `trigger_capture` stops a running recording instead of starting a capture.
+- `src-tauri/src/tray.rs` -- "Record screen" item after "Scrolling capture"; label + accelerator sync.
+- `src-tauri/src/settings.rs` -- `record_fps`, `record_show_cursor`, `record_system_audio`, `record_microphone`, `gif_fps`, `gif_max_width` with serde defaults and backfill tests.
+- `src-tauri/src/history.rs` -- `kind`, `duration_ms` on `HistoryEntry`; `record_saved_video`; `history_open_in_editor` routes videos to the Video Editor; `remove_files` deletes the `.mp4`.
+- `src-tauri/src/cli.rs` -- `record` subcommand (`-o`, `--duration <s>`, `--audio system,mic`, `--fps`), `probe <file>` headless subcommand.
+- `src-tauri/src/lib.rs` -- manage new state, register commands and the video protocol, `record::pill` prewarm not needed (pill is built per session like scroll's).
+- `src-tauri/src/export.rs` -- `recording_quicksave_file(settings)` beside `quicksave_file`.
+- `src-tauri/src/upload.rs` -- `upload_core` takes a filename + MIME type so an MP4 can go to S3, Google Drive and catbox (which accepts video); imgur/imgbb keep rejecting non-images.
+- `src/lib/ipc.ts` -- `CaptureMode` gains `"record"`; `recordStart/Stop/Cancel`, `onRecordProgress`, `videoProbe`, `videoExport`, `videoQuicksave`, `videoCopyFile`, `videoDiscard`, `videoUrl(id)`, `onVideoExportProgress`; `AppSettings` and `HistoryEntry` fields.
+- `src/App.tsx` -- routes `record` and `video-editor`.
+- `src/record/RecordControl.tsx` (new file) -- pill.
+- `src/video/VideoEditor.tsx`, `Timeline.tsx`, `VideoExportBar.tsx`, `videoTools.ts`, `videoTools.test.ts`, `timeline.ts`, `timeline.test.ts` (new files).
+- `src/overlay/Overlay.tsx` -- `mode: "record"` (region/window pick like scroll), audio toggle buttons in the confirm cluster on macOS, confirm calls `recordStart`.
+- `src/editor/Canvas.tsx` -- `hideBase?: boolean` prop (base canvas kept for sampling but not painted) and accept `baseImage` swaps without resetting shapes (already true via `setImage` -- verify in T3.4).
+- `src/editor/export.ts` -- `transparent` option on `flattenToPng` (skip drawing the base image).
+- `src/editor/Toolbar.tsx` -- `tools?: ToolId[]` whitelist prop; default keeps today's full bar.
+- `src/main/MainWindow.tsx` -- "Record screen" tile (full-width, compact) under "Scrolling capture"; audio toggles in the Settings panel not the tile.
+- `src/main/Settings.tsx` -- `MODE_LABELS.record`; a "Recording" section (fps, cursor, system audio, microphone on macOS; GIF fps / max width); GStreamer-missing notice on Linux.
+- `src/main/CaptureHistory.tsx` -- video entries show a poster, duration badge, Open / Show in folder / Delete (Copy hidden for videos).
+- `.github/workflows/build.yml` -- Linux jobs install `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev`.
+- `README.md`, `docs/USAGE.md`, `docs/CLI.md`, `docs/ARCHITECTURE.md`, `docs/BUILDING.md`, `docs/TESTING.md`, `site/index.html` -- documentation and landing page.
+
+## Phases
+
+### Phase 1: Record mode end to end on macOS (video only)
+**Goal:** Region/window/monitor/screen recording from the main window, tray, hotkey and `slickshot record` writes a playable H.264 MP4, lands in the editor-or-autosave flow and in history.
+**Checkpoint:** `./target/debug/slickshot record -o /tmp/r.mp4 --duration 5` produces a file; `./target/debug/slickshot probe /tmp/r.mp4` prints width/height/duration/fps/`audio: none`; QuickTime opens it. From the main window: Record tile -> drag region -> pill appears below the region -> Stop -> the file is auto-saved (with `After capture: Nothing`) and listed in History with a poster and duration. `cargo test` and `cargo clippy --all-targets` clean.
+
+- [x] **T1.1 -- Backend trait and shared transform layer**
+  - Files: `src-tauri/src/record/mod.rs`, `src-tauri/src/record/transform.rs`, `src-tauri/src/lib.rs`
+  - Do: define `RecordConfig { rect: PhysRect, monitor_id: u32, fps: u32, show_cursor: bool, system_audio: bool, microphone: bool, out_path: PathBuf }`, `VideoInfo { width, height, duration_ms, fps, has_audio }`, `TimeRange { start_ms, end_ms }`, `TranscodeOptions { range: TimeRange, speed: f32, crop: Option<PhysRect>, output: (u32, u32), keep_audio: bool }`, `RgbaFrame { image: RgbaImage, pts_ms: u64 }`, trait `VideoBackend: Send + Sync { fn start_recording(&self, cfg: &RecordConfig) -> RecordResult<Box<dyn ActiveRecording>>; fn probe(&self, path: &Path) -> RecordResult<VideoInfo>; fn decode_frames(&self, path: &Path, range: TimeRange, fps: u32, on_frame: &mut dyn FnMut(RgbaFrame) -> bool) -> RecordResult<()>; fn transcode(&self, src: &Path, dst: &Path, opts: &TranscodeOptions, process: &mut dyn FnMut(RgbaFrame) -> Option<RgbaFrame>) -> RecordResult<()>; }`, trait `ActiveRecording { fn stop(self: Box<Self>) -> RecordResult<PathBuf>; fn cancel(self: Box<Self>); fn elapsed(&self) -> Duration; }`, `RecordError` (thiserror: `Unsupported(String)`, `Permission(String)`, `Backend(String)`, `Io`), `default_backend()` selecting the platform module. In `transform.rs`: `crop(frame, rect)`, `resize(frame, w, h)` (`image::imageops::resize` Triangle), `composite_overlay(frame, overlay: &RgbaImage)` (premultiplied alpha blend at 0,0), `apply_censors(frame, censors: &[Censor])` where `Censor { rect: PhysRect, mode: Pixelate{block} | Solid{rgb} | Blur{sigma} }`, and `SpeedResampler::new(src_fps, speed).next(pts_ms) -> Vec<u64>` returning the output timestamps a source frame should be emitted at (drop/duplicate). Register `mod record;` in `lib.rs`.
+  - Depends on: --
+  - Done when: `cargo test record::transform` passes tests for crop bounds clamping, overlay alpha math on a 2x2 fixture, pixelate block averaging, and `SpeedResampler` emitting 2x fewer stamps at speed 2.0 and 2x more at 0.5 over a 100-frame synthetic sequence.
+
+- [x] **T1.0 -- Spike: ScreenCaptureKit region rounding on Retina**
+  - Files: `src-tauri/screen_record.m` (throwaway first version), `plans/add-video-capture-and-editor.md`
+  - Do: before any session/command code, write the minimal `SCStream` -> `AVAssetWriter` shim with only `tas_record_start/stop` and record 2 s of the primary display for these regions (points, at the display's 2x scale): 200x150 at (100,100); 401x301 at (33,17); 799x533 at (0,0); and one region whose pixel size is odd on both axes (H.264 needs even dimensions -- record what the writer does). For each, note the probed pixel size versus the requested `width/height`, whether the frame content is offset or scaled, and whether an odd `sourceRect` origin shifts by a pixel. Record the results as a table under "SCK spike results" in this plan's Open Questions section and pick the strategy T1.2 implements: either trust `sourceRect` + explicit even-rounded `width/height`, or capture the whole display and crop in Rust.
+  - Depends on: --
+  - Done when: the table has four rows and T1.2's Do says which strategy it uses.
+
+- [x] **T1.2 -- macOS recorder shim: ScreenCaptureKit -> AVAssetWriter (video only)**
+  - Files: `src-tauri/screen_record.m`, `src-tauri/src/record/macos.rs`, `src-tauri/build.rs`, `src-tauri/tauri.conf.json`
+  - Do: in `screen_record.m` implement `void *tas_record_start(uint32_t display_id, double x_pt, double y_pt, double w_pt, double h_pt, uint32_t fps, bool cursor, bool system_audio, bool microphone, const char *out_path, char **err_out)` (returns an opaque session or NULL), `char *tas_record_stop(void *session, char **err_out)` (finishes the writer, returns the path), `void tas_record_cancel(void *session)` (stops and unlinks), `double tas_record_elapsed(void *session)`. Use `SCShareableContent` to find the display by `CGDirectDisplayID`, `SCContentFilter initWithDisplay:excludingWindows:@[]`, `SCStreamConfiguration` with `sourceRect`, `width/height` = region in pixels (points x scale), `minimumFrameInterval = CMTimeMake(1, fps)`, `showsCursor`, `pixelFormat = kCVPixelFormatType_32BGRA`; an `SCStreamOutput` delegate appends `CMSampleBuffer`s to an `AVAssetWriterInputPixelBufferAdaptor` (`AVVideoCodecTypeH264`, `AVVideoExpectedSourceFrameRateKey`). Audio flags are accepted but ignored in this task (T2.1 wires them). Add `tas_video_probe(const char *path, char **err_out) -> char *` returning `w\th\tduration_ms\tfps\thas_audio` via `AVURLAsset`. In `macos.rs`, `MacBackend` implements `start_recording` and `probe` by converting `RecordConfig.rect` (physical) to points using the monitor's scale (`xcap::Monitor::scale_factor()` for `monitor_id`, the same conversion `capture/xcap_backend.rs`'s `macos::monitors()` does in reverse) and `CStr`/`CString` marshalling identical to `ocr.rs`'s `tas_vision_*` calls; `decode_frames`/`transcode` return `RecordError::Unsupported("Phase 3")` for now. In `build.rs` add `screen_record.m` to the `cc::Build` and `ScreenCaptureKit`, `AVFoundation`, `CoreMedia`, `CoreVideo` to the framework list. Set `bundle.macOS.minimumSystemVersion` to `"13.0"` in `tauri.conf.json`. The region strategy (native `sourceRect` versus full-display capture + Rust crop) is whichever T1.0's spike table selected; if it is the crop path, `start_recording` passes the display's full pixel size to the shim and wraps the writer input in `transform::crop`.
+  - Depends on: T1.0, T1.1
+  - Done when: a Rust `#[ignore]` live test `record::macos::live_tests::records_two_seconds` (run with `cargo test -- --ignored`) records the primary monitor's top-left 400x300 region for 2s and `probe` reports 400x300, 1900-2100 ms, fps 30, `has_audio: false`.
+
+- [x] **T1.3 -- Shared pill window module**
+  - Files: `src-tauri/src/record/pill.rs`, `src-tauri/src/scroll.rs`, `src-tauri/capabilities/default.json`
+  - Do: move `PILL_W`, `PILL_H`, `GAP_LOGICAL`, `control_position`, `place_control`, `pill_rect`, the `WebviewWindowBuilder` block in `scroll_start` (lines 316-360 of today's `scroll.rs`) and `close_control` into `pill.rs` as `pub fn open_pill(app, label: &str, route: &str, title: &str, rect: PhysRect) -> CommandResult<WebviewWindow>`, `pub fn close_pill(app, label)`, `pub fn pill_rect(window) -> Option<PhysRect>`, `pub fn place_control(...)`; keep the `place_control` unit tests, moved with it. `scroll.rs` calls `open_pill(app, "scroll-control", "index.html#scroll", "Scrolling capture", rect)` and `close_pill`; `without_pill` stays in `scroll.rs` and calls `record::pill::pill_rect`. Add `record-control` and `video-editor` to `capabilities/default.json` `windows`.
+  - Depends on: --
+  - Done when: `cargo test scroll` and `cargo test record::pill` pass (the five placement tests now live under `record::pill::tests`), and a manual scrolling capture still shows its pill below the region.
+
+- [x] **T1.4 -- Recording session, commands and delivery**
+  - Files: `src-tauri/src/recording.rs`, `src-tauri/src/lib.rs`, `src-tauri/src/export.rs`, `src-tauri/src/selection.rs`
+  - Do: `RecordSession { active: Mutex<Option<Box<dyn ActiveRecording>>>, pending_audio: Mutex<(bool, bool)>, out_path: Mutex<Option<PathBuf>> }` managed in `lib.rs`. Commands: `record_start(app, rect: PhysRect, system_audio: bool, microphone: bool)` -- refuses with `CommandError::Capture("a recording is already running")` if active; calls `crate::overlay::close_overlays` + `crate::selection::clear_selection` (same as `scroll_start`), sleeps 250 ms, finds the monitor containing `rect` (`Capturer::monitors()` + `PhysRect::intersect`, erroring if the rect spans two monitors: "recordings are limited to one monitor"), builds `RecordConfig` from settings (`record_fps`, `record_show_cursor`) with `out_path = app_data_dir/recordings/<uuid>.mp4`, calls `default_backend().start_recording`, then `record::pill::open_pill(app, "record-control", "index.html#record", "Recording", rect)`, and spawns a thread emitting `record:progress { elapsed_ms }` every 250 ms while active. `record_stop(app)` takes the active recording, `stop()`s it, closes the pill, and calls `deliver_recording(app, path, rect)`. `record_cancel(app)` cancels, closes the pill, clears `CliSink`. `deliver_recording`: take `CliSink` -> if `Some(output)` with `-o` move/rename the file there (a `.gif` output transcodes via T4.5, so until then error "GIF output needs the editor"); else honour `PostCaptureOverride`/`settings.post_capture`: `Editor`/`Thumbnail` -> `crate::video::open_editor(app, path)` (T3.3 -- until then, autosave), `None` -> `export::recording_quicksave_file(settings)` (`Recording <timestamp>.mp4` in the save folder) + `notify_saved` + `history::record_saved_video`. In `selection_cancel` reset `RecordSession.pending_audio`. `export.rs`: add `recording_quicksave_file`.
+  - Depends on: T1.1, T1.3
+  - Done when: invoking `record_start` from a temporary test tile (or the T1.6 tile) shows the pill; `record_stop` yields a file in the save folder and a "Screenshot saved"-style notification titled "Recording saved".
+
+- [x] **T1.5 -- `CaptureMode::Record` through run_capture, hotkeys, tray, settings, history**
+  - Files: `src-tauri/src/commands.rs`, `src-tauri/src/hotkeys.rs`, `src-tauri/src/tray.rs`, `src-tauri/src/settings.rs`, `src-tauri/src/history.rs`
+  - Do: add `Record` to `CaptureMode` (serde `"record"`), include it in both `run_capture` match arms that list `Scroll`. `hotkeys::default_bindings` gains an unbound `Record` entry; `trigger_capture` checks `RecordSession` first and calls `recording::record_stop` when active instead of `run_capture`. `tray.rs`: `capture_label(Record) = "Record screen"`, item id `capture_record` placed after `capture_scroll`, added to `CaptureMenuItems`. `settings.rs`: `record_fps: u32` (default 30, allowed 15/30/60), `record_show_cursor: bool` (true), `record_system_audio: bool` (false), `record_microphone: bool` (false), `gif_fps: u32` (15), `gif_max_width: u32` (720), `history_video_limit: u32` (20), each `#[serde(default = ...)]`, plus a test `old_settings_json_without_record_fields_deserializes`. `history.rs`: `HistoryEntry` gains `#[serde(default = "default_kind")] kind: EntryKind { Image, Video }` and `duration_ms: Option<u32>`; eviction runs per kind -- images against `MAX_HISTORY`, videos against `settings.history_video_limit` -- with a test that inserting a 21st video evicts the oldest video and no image; `record_saved_video(app, path, info: &VideoInfo)` copies the mp4 into the history dir as `<id>.mp4`, writes a poster thumb from `decode_frames` first frame (until T3.1 lands, use the macOS `probe` + a mid-clip frame via `tas_video_poster` added to the shim in this task: `char *tas_video_poster(path, out_png_path, err_out)` using `AVAssetImageGenerator`); `remove_files` also removes `<id>.mp4`; `history_open_in_editor` on a video entry calls `crate::video::open_editor` (T3.3; until then returns `CommandError::Image("video entries open in Phase 3")`). Add a serde test that an index row without `kind` parses as `Image`.
+  - Depends on: T1.4
+  - Done when: `cargo test settings history` passes the new backfill tests; the tray shows "Record screen"; pressing the Record hotkey (bind one in Settings for the check) once starts, twice stops.
+
+- [x] **T1.6 -- Overlay record mode and main-window tile**
+  - Files: `src/lib/ipc.ts`, `src/overlay/Overlay.tsx`, `src/main/MainWindow.tsx`, `src/main/Settings.tsx`, `src/App.tsx`, `src/record/RecordControl.tsx`
+  - Do: `ipc.ts`: add `"record"` to `CaptureMode`; `recordStart(rect, systemAudio, microphone)`, `recordStop()`, `recordCancel()`, `onRecordProgress(cb: (p: { elapsed_ms: number }) => void)`, `onRecordError`. `Overlay.tsx`: `recordMode = frame?.mode === "record"`; treat it exactly like `scrollMode` for selection behaviour (window-click snap, region drag, `regionMode` includes it, quick tools hidden, pin/copy/save/edit hidden); confirm label "Start recording"; in `handleConfirm`, `recordMode` calls `recordStart(rect, audio.system, audio.mic)` with the same error handling as `scrollStart`; add two toggle `IconButton`s (`Volume2` system audio, `Mic` microphone, `lucide-react`) to the cluster in record mode, rendered only when `navigator.platform` starts with "Mac", initialised from settings `record_system_audio`/`record_microphone`. Hint text: "Enter to start recording this region · Esc to cancel" / "Click a window to record it, or drag a region · Esc to cancel". `MainWindow.tsx`: full-width compact `ModeTile` "Record screen" (`Video` icon) directly under "Scrolling capture", `shortcutFor("record")`, `trigger("record")`. `Settings.tsx`: `MODE_LABELS.record = "Record screen"`. `App.tsx`: route `"record"` -> `<RecordControl />`. `RecordControl.tsx`: clone of `ScrollControl.tsx` showing `mm:ss` elapsed (from `record:progress`), small badges when audio is on, Cancel (Esc) and a red Stop (Enter) button.
+  - Depends on: T1.4, T1.5
+  - Done when: clicking the tile, dragging a region and pressing Stop after 3s produces a `Recording *.mp4` in the save folder (with `After capture: Nothing`), the pill counted up, `pnpm test` and `npx tsc --noEmit` are clean.
+
+- [x] **T1.7 -- CLI `record` and `probe`**
+  - Files: `src-tauri/src/cli.rs`, `src-tauri/src/recording.rs`
+  - Do: `CliCommand::Record { capture: CaptureArgs, #[arg(long)] duration: Option<f32>, #[arg(long, value_delimiter = ',')] audio: Vec<String>, #[arg(long)] fps: Option<u32> }` (interactive: forwards like `scroll`); `CliCommand::Probe { path: PathBuf }` (headless, prints the `VideoInfo` fields one per line). `dispatch` maps `Record` to `spawn_capture(app, CaptureMode::Record, capture)` after storing `duration`/`audio`/`fps` into a new `RecordCliOptions` state that `record_start` consumes (audio flags override the overlay toggles; `duration` arms a thread that calls `record_stop` after it elapses; `fps` overrides the setting). `-o` is honoured by `deliver_recording` via the existing `CliSink`; `--stdout` is rejected for `record` in `validate_interactive`. `--edit` opens the Video Editor (T3.3).
+  - Depends on: T1.4
+  - Done when: `slickshot record -o /tmp/r.mp4 --duration 3` (after picking a region) prints `/tmp/r.mp4`, and `slickshot probe /tmp/r.mp4` prints five lines.
+
+### Phase 2: Audio on macOS
+**Goal:** System audio and microphone toggles produce MP4s with AAC tracks; a denied microphone permission is a visible error, not a silent video-only file.
+**Checkpoint:** `slickshot record --audio system,mic -o /tmp/a.mp4 --duration 5` while music plays: `slickshot probe /tmp/a.mp4` reports `audio: yes`, and QuickTime plays both the music and the mic. With the mic denied in System Settings, the pill shows "Microphone access denied" and the recording continues video-only.
+
+- [ ] **T2.1 -- System audio via ScreenCaptureKit, microphone via AVCaptureSession**
+  - Files: `src-tauri/screen_record.m`, `src-tauri/src/record/macos.rs`, `src-tauri/Info.plist`, `src-tauri/tauri.conf.json`
+  - Do: when `system_audio`, set `SCStreamConfiguration.capturesAudio = YES`, `excludesCurrentProcessAudio = YES`, `sampleRate = 48000`, `channelCount = 2`, add an `SCStreamOutputTypeAudio` output whose sample buffers append to an `AVAssetWriterInput` (`AVFormatIDKey: kAudioFormatMPEG4AAC`, 48 kHz, 2 ch, 128 kbps). When `microphone`, create an `AVCaptureSession` with the default audio device and an `AVCaptureAudioDataOutput` appending to a second AAC input; call `[AVCaptureDevice requestAccessForMediaType:AVMediaTypeAudio completionHandler:]` first and, when denied, start without the mic and report `mic_denied` through a new `int tas_record_flags(void *session)` (bit 0 = mic denied). Start the writer session at the first video sample's PTS and shift audio PTS by the same offset. The microphone rides a different clock from ScreenCaptureKit, so it is resampled onto the SCK timeline rather than trusted: every mic `CMSampleBuffer`'s host-time PTS is compared with the most recent SCK sample's, an exponentially smoothed offset is maintained, and the mic PCM is fed through an `AVAudioConverter` whose input-to-output ratio is nudged by the measured drift (bounded to +-0.5%) before it is appended, so the two tracks end a long recording in sync instead of tens of milliseconds apart. `Info.plist` (new): `NSMicrophoneUsageDescription = "SlickShot records your microphone when the microphone toggle is on."`; confirm `tauri.conf.json` needs no change for the plist (Tauri picks up `src-tauri/Info.plist`).
+  - Depends on: T1.2
+  - Done when: the live test `records_two_seconds_with_system_audio` reports `has_audio: true` and the file's audio track count is 1 (system) or 2 (system + mic) via `tas_video_probe` extended to return the track count; and a 5-minute recording with both sources of a metronome played through the speakers next to the mic shows the two tracks' clicks within 20 ms of each other at the end (measured by opening the file in the Video Editor and comparing the last click's position on each track's waveform, or with `slickshot probe --track-offsets`, a debug flag added in this task that prints the first and last audio sample PTS per track).
+
+- [ ] **T2.2 -- Audio flags through the session and the pill**
+  - Files: `src-tauri/src/recording.rs`, `src/record/RecordControl.tsx`, `src/lib/ipc.ts`, `src/main/Settings.tsx`
+  - Do: `record_start` passes the flags into `RecordConfig`; after start, read `tas_record_flags` via a new `ActiveRecording::warnings() -> Vec<String>` and emit `record:warning` ("Microphone access denied -- recording without it") which the pill shows under the timer. Settings: a "Recording" section with fps `Segmented` (15 / 30 / 60), "Show cursor" `Switch`, and on macOS "Capture system audio" / "Capture microphone" `Switch`es (defaults for the overlay toggles); the existing "History" section gains a "Keep up to N recordings" numeric `Field` bound to `history_video_limit` (1-100).
+  - Depends on: T2.1, T1.6
+  - Done when: toggling the mic on the overlay with access denied shows the warning on the pill and the file still plays.
+
+### Phase 3: Video Editor -- player, trim, MP4 export, history
+**Goal:** Recordings open in a Video Editor window that plays the clip, trims it, and exports MP4; Quick save / Copy file / Upload / Discard match the image editor's export bar.
+**Checkpoint:** record 10s -> editor opens (`After capture: Editor`) -> set trim 2s-6s -> Save As `/tmp/t.mp4` -> `slickshot probe /tmp/t.mp4` reports 3900-4100 ms and the same dimensions; the entry appears in History with a poster; reopening from History restores the file in the editor.
+
+- [ ] **T3.1 -- macOS decode and transcode in the shim**
+  - Files: `src-tauri/screen_record.m`, `src-tauri/src/record/macos.rs`
+  - Do: `int tas_video_decode(const char *path, double start_s, double end_s, uint32_t fps, void *ctx, bool (*on_frame)(void *ctx, const uint8_t *bgra, uint32_t w, uint32_t h, uint32_t stride, double pts_s), char **err_out)` using `AVAssetReader` with `kCVPixelFormatType_32BGRA` output, skipping frames to hit `fps`, stopping when the callback returns false. `int tas_video_transcode(const char *src, const char *dst, double start_s, double end_s, double speed, uint32_t out_w, uint32_t out_h, bool keep_audio, void *ctx, bool (*process)(void *ctx, uint8_t *bgra_in, uint32_t in_w, uint32_t in_h, uint32_t in_stride, uint8_t *bgra_out, double *pts_s_inout), char **err_out)`: reader video track -> callback fills an `out_w x out_h` BGRA buffer and may rewrite the PTS (speed) or return false to drop the frame -> `AVAssetWriterInputPixelBufferAdaptor`; when `keep_audio`, build an `AVMutableComposition` holding the trimmed audio tracks, apply `scaleTimeRange:toDuration:` by `1/speed` (a no-op at 1.0), and read it back through an `AVAssetReaderAudioMixOutput` (PCM) into an AAC `AVAssetWriterInput` -- so audio stays in sync at every speed on macOS. `macos.rs` implements `decode_frames`/`transcode` by converting BGRA<->RGBA around the callbacks (`RgbaFrame` is RGBA) and by boxing the Rust closure as `ctx`.
+  - Depends on: T1.2
+  - Done when: a live test records 3s, transcodes 1.0s-2.0s at 1x with an identity callback, and `probe` reports 950-1050 ms with `has_audio` unchanged; `decode_frames` over the same range at fps 10 yields 9-11 frames.
+
+- [ ] **T3.2 -- Video store, Range protocol and editor commands**
+  - Files: `src-tauri/src/video.rs`, `src-tauri/src/images.rs`, `src-tauri/src/lib.rs`, `src-tauri/tauri.conf.json`, `src-tauri/Cargo.toml`, `src/lib/ipc.ts`
+  - Do: `VideoStore(Mutex<HashMap<String, PathBuf>>)` with `insert(path) -> id`, `get`, `remove`. `register_video_protocol(builder)` (asynchronous, like `register_shot_protocol`) serving `slickshot-video://<id>` with `Content-Type: video/mp4`, `Accept-Ranges: bytes`, and `206` + `Content-Range` for `Range` requests parsed by the `http-range` crate (add `http-range = "0.1"` to `Cargo.toml`; `Access-Control-Allow-Origin: *`, expose `content-range`). CSP: append `media-src 'self' slickshot-video: http://slickshot-video.localhost`. Commands: `video_probe(id) -> VideoInfo`, `video_export_prepare(id, opts: ExportRequest { range, speed, crop, output_size, format: "mp4" | "gif", dest: { kind: "path", path } | { kind: "quicksave" }, censors: Vec<Censor> })` stores the request in a `PendingVideoExport` state, and `video_export(request)` -- whose raw binary body is the optional overlay PNG (empty body = no overlay), mirroring `export_prepare`/`export_commit` -- runs it and returns the saved path (mp4 via `transcode`, gif via T4.5; emits `video:export-progress { done, total }`), `video_copy_file(id)` (puts the file itself on the clipboard through `record::clipboard::copy_file(path)`, T3.5), `video_discard(id)` (removes temp file + store entry), `video_reveal(id)` (`opener::reveal_item_in_dir`). `ipc.ts`: `videoUrl(id) = convertFileSrc(id, "slickshot-video")`, the command wrappers, and `ExportRequest` types.
+  - Depends on: T3.1
+  - Done when: `curl -r 0-99 http://slickshot-video.localhost/<id>` (dev build) returns `206` with `Content-Range: bytes 0-99/<len>`, and a browser `<video>` seeks without buffering the whole file.
+
+- [ ] **T3.3 -- Video Editor window and route**
+  - Files: `src-tauri/src/video.rs`, `src-tauri/src/recording.rs`, `src-tauri/src/history.rs`, `src/App.tsx`, `src/video/VideoEditor.tsx`, `src/lib/ipc.ts`
+  - Do: `video::open_editor(app, path) -> CommandResult<()>`: insert into `VideoStore`, build (or reuse) the `video-editor` window (`WebviewWindowBuilder`, 1200x800, `index.html#video-editor?video=<id>`, hidden until `video_editor_ready`, same `wait_for_mount` dance as `editor::show`), emit `video-editor:open { id }`. `deliver_recording` and `history_open_in_editor` (video entries) call it; `HistoryOrigin` is reused so saving from the editor updates the same entry. `VideoEditor.tsx`: layout copied from `Editor.tsx` (toolbar row, canvas area, right panel, status bar) with a `<video src={videoUrl(id)} preload="auto">` in the canvas area; `videoProbe` sets the store's `setImage(id, w, h)`; play/pause on Space; keyboard shortcuts reuse `Editor.tsx`'s `onKeyDown` guard pattern. `App.tsx` route `"video-editor"`.
+  - Depends on: T3.2, T1.4
+  - Done when: after a recording with `After capture: Editor`, the window appears showing the first frame, plays with Space, and closing it (`video_discard` on close-without-save, "Discard recording?" dialog copied from the image editor's guard) leaves no file under `recordings/`.
+
+- [ ] **T3.4 -- Timeline with trim handles, and MP4 export bar**
+  - Files: `src/video/Timeline.tsx`, `src/video/timeline.ts`, `src/video/timeline.test.ts`, `src/video/VideoExportBar.tsx`, `src/video/VideoEditor.tsx`
+  - Do: `timeline.ts` pure helpers: `clampTrim(start, end, duration, minLen = 100)`, `pxToMs(px, width, duration)`, `msToPx`, `formatTimecode(ms)`; tests for clamping (handles can't cross, min length, out of range). `Timeline.tsx`: a filmstrip-free scrubber (a full-width track, playhead, two draggable trim handles that dim the excluded ranges, current/total timecodes, play/pause button); dragging a handle seeks the video to it. `VideoExportBar.tsx`: Save As (native dialog, filters MP4/GIF), Quick save, Copy file, Upload (exports a temp MP4 and sends it through `upload_core` with filename `Recording <timestamp>.mp4` and MIME `video/mp4` -- shown only when the provider is `S3`, `Gdrive` or `Catbox`; imgur and imgbb reject video, so the button is hidden for them with the upload-history entry recorded like an image upload), Discard; a progress bar bound to `video:export-progress`. Export sends `ExportRequest` with the trim range and `format: "mp4"`; on success `history::record_saved_video` runs inside `video_export` for path/quicksave destinations, and the "Recording saved" notification fires.
+  - Depends on: T3.3
+  - Done when: the phase checkpoint above holds; `pnpm test` runs `timeline.test.ts` green.
+
+- [ ] **T3.5 -- Native file clipboard on all three platforms**
+  - Files: `src-tauri/src/record/clipboard.rs`, `src-tauri/screen_record.m`, `src-tauri/Cargo.toml`
+  - Do: `pub fn copy_file(path: &Path) -> Result<(), String>` with a platform body each. macOS: shim `bool tas_clipboard_copy_file(const char *path, char **err_out)` -- `[[NSPasteboard generalPasteboard] clearContents]` then `writeObjects:@[[NSURL fileURLWithPath:]]`, so Finder pastes the file and Messages/Mail attach it. Windows: `OpenClipboard` / `EmptyClipboard` / `SetClipboardData(CF_HDROP, hGlobal)` where the `HGLOBAL` holds a `DROPFILES` header (`fWide = TRUE`, `pFiles = sizeof(DROPFILES)`) followed by the double-NUL-terminated UTF-16 path (add `Win32_System_DataExchange`, `Win32_System_Memory`, `Win32_UI_Shell` features to `windows`). Linux: own the `CLIPBOARD` selection with `x11rb` (already a Linux dependency) from a detached thread, answering `TARGETS` with `text/uri-list`, `x-special/gnome-copied-files` and `UTF8_STRING`, serving `file://<path>\r\n`, `copy\nfile://<path>` and the plain path respectively, and exiting when another client takes the selection -- the same "serve until replaced" shape `export.rs`'s Linux image copy already uses through `arboard`. The button's tooltip is "Copy file" on every platform.
+  - Depends on: T3.2
+  - Done when: after Copy file, pasting in Finder (macOS) creates a copy of the MP4; the Windows and Linux paths are compile-checked here and listed in the T5.3 hardware hand-off checklist (paste into Explorer / Nautilus).
+
+### Phase 4: Editor transforms -- crop, speed, resize, annotations, GIF
+**Goal:** Every scope item from the "all the features" decision exports correctly through the shared Rust transform layer.
+**Checkpoint:** On a 10s 1600x1000 recording: crop to 800x500, speed 2x, resize to 50%, trim 1-9s, one red rectangle + one pixelate censor, export MP4 -> probe reports 400x250 and 3900-4100 ms, the rectangle is visible at the cropped position, the censored area is blocky in every frame (scrub through), and no audio track (speed != 1). Same settings as GIF at 15 fps -> a file under 20 MB that loops in a browser.
+
+- [ ] **T4.1 -- Crop and resize in the editor**
+  - Files: `src/video/VideoEditor.tsx`, `src/editor/Canvas.tsx`, `src/editor/PropertiesPanel.tsx`, `src/video/videoTools.ts`
+  - Do: `Canvas.tsx` gains `hideBase?: boolean` (the base canvas still receives the paused frame for sampling tools but is `visibility: hidden` so the `<video>` shows through). The crop tool works unchanged (it edits `cropRect` in the store); `VideoEditor` does not bake the crop on confirm -- it keeps `cropRect` as the export crop and dims outside it, since baking would require re-encoding. The Resize field in `PropertiesPanel` (already there for images, driven by `resize`/`onResizeChange`) is reused; `videoTools.ts` exports `VIDEO_TOOLS: ToolId[]` (the whitelist from Approach) passed to `Toolbar`'s new `tools` prop, and `extractCensors(shapes) -> Censor[]` + `shapesForOverlay(shapes)` (everything except censors) with tests.
+  - Depends on: T3.4
+  - Done when: a crop + resize export produces the expected dimensions via `probe`; `videoTools.test.ts` covers censor extraction for the three censor modes.
+
+- [ ] **T4.2 -- Speed control**
+  - Files: `src/video/Timeline.tsx`, `src/video/VideoEditor.tsx`, `src-tauri/src/video.rs`, `src-tauri/src/record/transform.rs`
+  - Do: a `Segmented` 0.5x / 1x / 1.5x / 2x / 4x next to the play button; preview sets `video.playbackRate`; export passes `speed`. In `video_export`, the transcode `process` closure uses `SpeedResampler` to rewrite each frame's PTS (and drop/duplicate frames); `keep_audio` is `true` on macOS and `speed == 1.0` elsewhere, and the export bar shows "Audio is removed at speeds other than 1x" only on Windows/Linux when `has_audio && speed != 1`.
+  - Depends on: T4.1, T1.1
+  - Done when: a 2x export halves the probed duration (+-100 ms); on macOS the clip keeps `has_audio: true` and the audio plays in sync at the faster rate.
+
+- [ ] **T4.3 -- Annotation overlay burn-in**
+  - Files: `src/editor/export.ts`, `src/video/VideoEditor.tsx`, `src-tauri/src/video.rs`
+  - Do: `flattenToPng` gets `transparent?: boolean` (skip the base image draw, keep the canvas cleared to transparent); the Video Editor flattens `shapesForOverlay(shapes)` at source resolution and sends the PNG as the raw request body of `video_export` (the JSON options travel in a preceding `video_export_prepare` command, mirroring `export_prepare`/`export_commit`). `video_export` decodes the PNG to `RgbaImage` once and the `process` closure runs `transform::crop` -> `composite_overlay` (overlay cropped identically) -> `apply_censors` (rects offset by the crop) -> `resize`.
+  - Depends on: T4.1
+  - Done when: exporting with a rectangle at (100,100) and crop starting at (50,50) shows the rectangle at (50,50) in the output's first frame (verified by `decode_frames` in a test-mode CLI flag, or by opening the frame in the image editor).
+
+- [ ] **T4.4 -- Per-frame censor**
+  - Files: `src-tauri/src/record/transform.rs`, `src-tauri/src/video.rs`
+  - Do: implement `apply_censors` for `Pixelate { block }` (average each block), `Solid { rgb }`, `Blur { sigma }` (`image::imageops::blur` on the sub-image, clamped to sigma <= 12 to bound cost); censor rects are clamped to the frame. Wire into the T4.3 closure.
+  - Depends on: T4.3
+  - Done when: `cargo test record::transform::censor` passes (a pixelated 8x8 block becomes uniform; solid fill exact; blur reduces variance) and the phase checkpoint's censor scrub check holds.
+
+- [ ] **T4.5 -- GIF export**
+  - Files: `src-tauri/src/record/gif.rs`, `src-tauri/src/video.rs`, `src/video/VideoExportBar.tsx`, `src-tauri/src/recording.rs`
+  - Do: `gif::encode(frames: impl Iterator<Item = RgbaFrame>, fps: u32, out: &mut impl Write)` using the `gif` crate: global palette from the first frame via `color_quant::NeuQuant` (sample factor 10), per-frame delay from consecutive PTS, frame differencing (only the changed bounding box is written, disposal Keep) to keep files small, `Repeat::Infinite`. `video_export` with `format: "gif"` runs `decode_frames` at `settings.gif_fps` over the trim range, applies the same transform closure, scales to `min(output width, settings.gif_max_width)` and streams into the encoder. The export bar's GIF choice shows fps and max-width fields prefilled from settings. `deliver_recording` with a CLI `-o *.gif` sink now transcodes instead of erroring.
+  - Depends on: T4.3, T3.1
+  - Done when: `cargo test record::gif` passes (a 10-frame synthetic sequence encodes to a GIF whose frame count and delays round-trip through the `gif` decoder), and the checkpoint's GIF loops in a browser.
+
+### Phase 5: Windows and Linux backends
+**Goal:** The same trait is implemented on both platforms with their native encoders, CI builds all three, Linux reports a missing GStreamer instead of failing silently, and both platforms have been run on real hardware by the user.
+**Checkpoint:** GitHub Actions `build.yml` is green on ubuntu-24.04, macos-latest and windows-latest; the T5.3 checklist has been run on a real Windows machine and a real X11 Linux machine with every item passing (including the "Recording needs GStreamer" notice dimming the Record tile with the OCR tile's warning-marker pattern).
+
+- [ ] **T5.1 -- Windows: Media Foundation recorder and transcoder**
+  - Files: `src-tauri/src/record/windows.rs`, `src-tauri/Cargo.toml`
+  - Do: extend the `windows` crate features (`Win32_Media_MediaFoundation`, `Win32_Graphics_Direct3D11`, `Win32_Graphics_Dxgi_Common`, `Win32_System_Com_StructuredStorage`). `WindowsBackend::start_recording`: `MFStartup`, `MFCreateSinkWriterFromURL` with `MF_SINK_WRITER_DISABLE_THROTTLING`, output type H.264 (`MFVideoFormat_H264`, average bitrate from `width*height*fps*0.1`), input type `MFVideoFormat_RGB32` at region size; a thread pulls `xcap::Monitor::video_recorder()` frames, crops with `transform::crop`, converts RGBA->BGRA, paces to `fps` by dropping frames, and `WriteSample`s with 100 ns timestamps from an `Instant`. `stop` finalizes. `probe`/`decode_frames`/`transcode` via `MFCreateSourceReaderFromURL` with `MF_SOURCE_READER_ENABLE_VIDEO_PROCESSING` and RGB32 output; transcode audio passthrough copies compressed samples when `keep_audio`. The cursor: `xcap`'s Windows recorder does not draw it -- `show_cursor` is documented as macOS-only until a later pass.
+  - Depends on: T1.1, T3.1 (interface parity)
+  - Done when: `cargo check --target x86_64-pc-windows-msvc` passes locally (rustup target added; link step not required for `check`) and the Windows CI job builds.
+
+- [ ] **T5.2 -- Linux: GStreamer recorder and transcoder**
+  - Files: `src-tauri/src/record/linux.rs`, `src-tauri/Cargo.toml`, `src-tauri/tauri.conf.json`, `.github/workflows/build.yml`, `src-tauri/src/settings.rs`, `src/main/Settings.tsx`, `src/main/MainWindow.tsx`
+  - Do: add `gstreamer = "0.23"`, `gstreamer-app = "0.23"`, `gstreamer-video = "0.23"` under the Linux target. `LinuxBackend::start_recording`: `gst::init`, pipeline `appsrc name=src caps=video/x-raw,format=RGBA,width=W,height=H,framerate=FPS/1 ! videoconvert ! ENC ! h264parse ! mp4mux ! filesink location=OUT`, `pipeline_description(w, h, fps, out, encoders_available) -> String` picks the first available of `vaapih264enc`, `x264enc speed-preset=veryfast tune=zerolatency`, `openh264enc` (unit-tested with a fake availability list); a thread pushes cropped `xcap` frames as `gst::Buffer`s with PTS from an `Instant`; `stop` sends EOS and waits for the bus. `probe`: `gst_pbutils::Discoverer`. `decode_frames`/`transcode`: `uridecodebin ! videoconvert ! appsink caps=video/x-raw,format=RGBA` feeding the callback, re-encoding through the same encoder chain; audio passthrough via a second `uridecodebin` pad -> `mp4mux` when `keep_audio`. `record_engine_status` command returns `{ available: bool, reason: String }` (`gst::init` + at least one encoder found), surfaced in Settings' Recording section and as the Record tile's `warning` flag (same pattern as `ocrStatus`). CI: add `libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev` to both Linux apt blocks in `build.yml`; `tauri.conf.json` deb `depends` add `gstreamer1.0-plugins-good, gstreamer1.0-plugins-bad, gstreamer1.0-plugins-ugly`, rpm `gstreamer1-plugins-good, gstreamer1-plugins-bad-free, gstreamer1-plugins-ugly-free`.
+  - Depends on: T1.1, T3.1
+  - Done when: `cargo test record::linux::pipeline_description` passes on macOS (the function is `cfg`-free), and the Linux CI job builds and its `cargo test` passes.
+
+- [ ] **T5.3 -- Real-hardware hand-off for Windows and Linux**
+  - Files: `docs/TESTING.md`
+  - Do: add a "Recording" block to the Known risk areas table and a step-by-step checklist per platform: install the built bundle, record a 10 s region with the cursor moving, `probe` the file, open it in the Video Editor, trim + 2x + GIF export, Copy file then paste into Explorer / Nautilus, confirm the Linux GStreamer-missing notice by uninstalling `gstreamer1.0-plugins-ugly`. Then stop: the user runs the checklist on a real Windows machine and a real X11 Linux machine and reports back; anything that fails is fixed in T5.1/T5.2 before Phase 6 starts.
+  - Depends on: T5.1, T5.2, T3.5
+  - Done when: the user has reported the checklist results for both platforms and every failing item has a fix committed.
+
+### Phase 6: Documentation, site, and verification sweep
+**Goal:** Every user-facing surface documents recording, and the full test/lint matrix is green.
+**Checkpoint:** `pnpm test`, `npx tsc --noEmit`, `cargo test`, `cargo clippy --all-targets`, `cargo fmt --check` all clean; `git diff --stat` touches no file outside "Files to Change" without a note in the plan.
+
+- [ ] **T6.1 -- Docs and landing page**
+  - Files: `README.md`, `docs/USAGE.md`, `docs/CLI.md`, `docs/ARCHITECTURE.md`, `docs/BUILDING.md`, `docs/TESTING.md`, `site/index.html`
+  - Do: README Features gains "**Screen recording:** ..." and "**Video editor:** ..." bullets after Scrolling capture, the hotkeys bullet lists `record` as unbound, Known limitations gains the audio-macOS-only, single-monitor, speed-drops-audio and Linux-GStreamer notes; USAGE gains a "Recording" and a "Video editor" section (tools available, timeline, export bar); CLI.md adds `record` and `probe` rows, the `--duration`/`--audio`/`--fps` flags, and a `slickshot record -o demo.gif --duration 10` example; ARCHITECTURE gains a "Recording pipeline" section mirroring the diagram above; BUILDING lists the GStreamer dev packages; TESTING adds rows for the three backends, the mic-permission path and the Range protocol; `site/index.html` adds a "Record screen" tile to the main-window mockup (after the scrolling tile at line 1127), a "Screen recording" feature card beside "Scrolling capture" (line 1163) and `slickshot record` in the CLI table.
+  - Depends on: T1.7, T5.3
+  - Done when: `grep -c "record" docs/CLI.md README.md docs/USAGE.md` are all >= 1 and the site renders the new tile in a browser.
+
+- [ ] **T6.2 -- Verification sweep**
+  - Files: --
+  - Do: run `pnpm test`, `npx tsc --noEmit`, `cargo test`, `cargo test -- --ignored record::macos` (live, on this Mac), `cargo clippy --all-targets`, `cargo fmt --check`; walk the Phase 1-4 checkpoints once more against a fresh dev build (`pnpm dev` + `target/debug/slickshot`, per the dist/devUrl note in Constraints).
+  - Depends on: T6.1
+  - Done when: every command exits 0 and the checkpoints hold.
+
+## Constraints
+- **No new C library dependencies on macOS/Windows.** ObjC/Win32 system frameworks only (the repo already rejects libwebp for this reason). Linux may add GStreamer because it is a system library on the same footing as Tesseract, and only with a runtime availability check.
+- **No code from macshot** -- it is GPLv3 and the repo treats it as a feature reference only.
+- **All geometry crossing IPC is physical pixels** (`PhysRect`), converted to points/logical only inside the platform module that needs them (the scroll-capture `warp_pointer` bug is the cautionary tale).
+- **Every capture path stays re-entrancy safe:** `record_start` must respect `CaptureClaim`/`OverlayImages` exactly as `scroll_start` does, and a running recording refuses a second one.
+- **Testing a dev binary requires `pnpm dev` running** (a plain `cargo build` binary loads `devUrl`); the live checkpoints assume that.
+- **Comments only where the why is non-obvious**, matching the existing codebase's style; no docstrings on trivial functions.
+- **One focused commit per phase**, each with the session trailer, matching the repo's history.
+
+## Open Questions / Risks
+- **SCK spike results (T1.0)** -- run on this Mac (2x Retina, macOS 26.5), 1.2s per case:
+
+  | requested (points @x,y) | asked px | got px | note |
+  | --- | --- | --- | --- |
+  | 200x150 @100,100 | 400x300 | 400x300 | exact |
+  | 401x301 @33,17 | 802x602 | 802x602 | exact, odd points are fine |
+  | 799x533 @0,0 | 1598x1066 | 1598x1066 | exact |
+  | 333.5x222.5 @11,7 | 667x445 | 666x444 | rounded down to even by our own `tas_even` |
+
+  **Strategy chosen: native `sourceRect` + explicit even-rounded `width`/`height`.** No full-display capture plus Rust crop is needed -- SCK honours `sourceRect` exactly, and fractional points scale cleanly. The only deviation is our own even-rounding for H.264, which can make a recording up to 1px narrower/shorter than the region dragged; harmless, and preferable to the encoder failing on an odd size.
+- **Mic resampling (T2.1)** bounds the drift correction to +-0.5%; a machine whose mic clock drifts faster than that will still slip, and the 5-minute metronome check is what would reveal it.
+- **Windows and Linux** are `cargo check`ed and CI-built here, then gated on the user's real-hardware run (T5.3) before documentation and the final sweep. Until that run, encoder availability, Media Foundation color conversion, xcap frame pacing and the native file-clipboard paths are unverified.
+- **xcap's Windows/Linux recorders have no cursor or fps control** -- fps pacing drops frames to the target rate in Rust and the cursor is not drawn there. Documented as a limitation in T6.1.
+- **Recording temp files** under `app_data_dir/recordings/` are removed on discard/save; a crash mid-recording leaves an unfinalized MP4 -- `record_start` sweeps files older than 24 h on launch.
+
+## Out of scope (v1)
+Time-ranged annotations, cursor click highlighting, webcam overlay, audio on Windows/Linux (including audio time-stretch there), multi-monitor spanning recordings, Wayland recording, a video variant of the post-capture thumbnail window, video upload to imgur/imgbb, and the image editor's magnifier / eyedropper / measure / OCR / backdrop / adjustments on video.

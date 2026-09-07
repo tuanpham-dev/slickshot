@@ -8,7 +8,9 @@
     "overlay-*",
     "pin-*",
     "scroll-control",
-    "thumbnail"
+    "thumbnail",
+    "record-control",
+    "video-editor"
   ],
   "permissions": [
     "core:default",

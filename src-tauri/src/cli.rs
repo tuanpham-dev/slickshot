@@ -46,6 +46,25 @@ pub enum CliCommand {
         #[command(flatten)]
         capture: CaptureArgs,
     },
+    /// Pick a region or a window, then record it to an MP4 until stopped.
+    Record {
+        #[command(flatten)]
+        capture: CaptureArgs,
+        /// Stop automatically after this many seconds, instead of waiting
+        /// for Stop on the pill. What makes this scriptable.
+        #[arg(long)]
+        duration: Option<f32>,
+        /// Audio sources to capture (macOS only): `system`, `mic`, or both
+        /// comma-separated. Overrides the saved defaults for this run.
+        #[arg(long, value_delimiter = ',')]
+        audio: Vec<String>,
+        /// Frames per second, overriding the saved setting for this run.
+        #[arg(long)]
+        fps: Option<u32>,
+    },
+    /// Print a recording's dimensions, duration, frame rate and whether it
+    /// has audio.
+    Probe { path: PathBuf },
     /// Re-shoot the last confirmed region without showing the overlay.
     /// Needs the app running -- the region is remembered by it.
     RepeatRegion {
@@ -90,10 +109,12 @@ impl CliCommand {
             | CliCommand::Ocr { .. }
             | CliCommand::Qr { .. }
             | CliCommand::Upload { .. }
+            | CliCommand::Probe { .. }
             | CliCommand::ListMonitors => true,
             CliCommand::Window { title, .. } => title.is_some(),
             CliCommand::Region { .. }
             | CliCommand::Scroll { .. }
+            | CliCommand::Record { .. }
             | CliCommand::RepeatRegion { .. }
             | CliCommand::Open { .. } => false,
         }
@@ -163,6 +184,14 @@ impl From<PostCaptureArg> for crate::settings::PostCaptureAction {
 /// that exits before the capture actually happens -- there is no PNG bytes
 /// to write to stdout by the time that would matter.
 pub fn validate_interactive(cmd: &CliCommand) -> Result<(), String> {
+    if let CliCommand::Record { capture, .. } = cmd {
+        if capture.output.stdout {
+            return Err("--stdout is not supported for recordings".into());
+        }
+        if capture.output.clipboard {
+            return Err("-c/--clipboard is not supported for recordings -- use -o".into());
+        }
+    }
     let output = match cmd {
         CliCommand::Region { capture } => Some(&capture.output),
         CliCommand::Window { title: None, capture } => Some(&capture.output),
@@ -292,6 +321,17 @@ pub fn run_headless(cmd: CliCommand) -> Result<(), String> {
             println!("{}", result.url);
             Ok(())
         }
+        CliCommand::Probe { path } => {
+            let info = crate::record::default_backend()
+                .probe(&path)
+                .map_err(|e| e.to_string())?;
+            println!("width: {}", info.width);
+            println!("height: {}", info.height);
+            println!("duration_ms: {}", info.duration_ms);
+            println!("fps: {:.3}", info.fps);
+            println!("audio: {}", if info.has_audio { "yes" } else { "none" });
+            Ok(())
+        }
         CliCommand::ListMonitors => {
             let capturer = crate::capture::default_capturer();
             let monitors = capturer.monitors().map_err(|e| e.to_string())?;
@@ -306,6 +346,7 @@ pub fn run_headless(cmd: CliCommand) -> Result<(), String> {
         }
         CliCommand::Region { .. }
         | CliCommand::Scroll { .. }
+        | CliCommand::Record { .. }
         | CliCommand::RepeatRegion { .. }
         | CliCommand::Window { title: None, .. }
         | CliCommand::Open { .. } => {
@@ -456,6 +497,20 @@ pub fn dispatch(app: AppHandle, cmd: CliCommand) {
         CliCommand::Open { path } => spawn_open(app, path),
         CliCommand::Region { capture } => spawn_capture(app, CaptureMode::Region, capture),
         CliCommand::Scroll { capture } => spawn_capture(app, CaptureMode::Scroll, capture),
+        CliCommand::Record { capture, duration, audio, fps } => {
+            // Consumed by `record_start` for exactly the capture this
+            // triggers, so a scripted run cannot leak its audio choice into
+            // whatever the user records by hand afterwards.
+            let has = |name: &str| audio.iter().any(|a| a.eq_ignore_ascii_case(name));
+            *app.state::<crate::recording::RecordCliOptions>().0.lock().unwrap() =
+                Some(crate::recording::CliRecordOptions {
+                    duration_s: duration,
+                    system_audio: audio.is_empty().then_some(false).or(Some(has("system"))),
+                    microphone: audio.is_empty().then_some(false).or(Some(has("mic"))),
+                    fps,
+                });
+            spawn_capture(app, CaptureMode::Record, capture)
+        }
         // Not headless despite showing no overlay: the region it re-shoots is
         // remembered by the running app, so it has to be dispatched into it.
         CliCommand::RepeatRegion { capture } => spawn_capture(app, CaptureMode::RegionRepeat, capture),

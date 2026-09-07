@@ -67,6 +67,10 @@ pub fn default_bindings() -> Vec<HotkeyBinding> {
             accelerator: String::new(),
             mode: CaptureMode::Scroll,
         },
+        HotkeyBinding {
+            accelerator: String::new(),
+            mode: CaptureMode::Record,
+        },
     ]
 }
 
@@ -105,6 +109,19 @@ pub fn sync(app: &AppHandle, bindings: Vec<HotkeyBinding>) {
 fn trigger_capture(app: &AppHandle, mode: CaptureMode) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        // The Record shortcut toggles: while a recording runs it is the only
+        // way to stop one without reaching for the pill, and starting a
+        // second recording is refused anyway. A separate "stop" binding was
+        // the alternative, but `HotkeyBinding` maps to a `CaptureMode` and
+        // stopping is not a capture.
+        if mode == CaptureMode::Record
+            && app.state::<crate::recording::RecordSession>().is_running()
+        {
+            if let Err(e) = crate::recording::record_stop(app.clone()).await {
+                eprintln!("[hotkeys] couldn't stop the recording: {e}");
+            }
+            return;
+        }
         let capturer = app.state::<Capturer>();
         let session = app.state::<Mutex<Option<CaptureSession>>>();
         let images = app.state::<ImageStore>();

@@ -1,0 +1,411 @@
+//! macOS recording backend. All the Objective-C lives in `screen_record.m`;
+//! this is the marshalling layer, shaped like `ocr.rs`'s Vision bindings.
+
+use std::ffi::{c_char, c_void, CStr, CString};
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+use image::RgbaImage;
+
+use super::{
+    ActiveRecording, RecordConfig, RecordError, RecordResult, RgbaFrame, TimeRange,
+    TranscodeOptions, VideoBackend, VideoInfo,
+};
+
+const FLAG_MIC_DENIED: i32 = 1 << 0;
+const FLAG_MIC_FAILED: i32 = 1 << 1;
+
+extern "C" {
+    fn tas_record_start(
+        display_id: u32,
+        x_pt: f64,
+        y_pt: f64,
+        w_pt: f64,
+        h_pt: f64,
+        scale: f64,
+        fps: u32,
+        cursor: bool,
+        system_audio: bool,
+        microphone: bool,
+        out_path: *const c_char,
+        err_out: *mut *mut c_char,
+    ) -> *mut c_void;
+    fn tas_record_stop(session: *mut c_void, err_out: *mut *mut c_char) -> *mut c_char;
+    fn tas_record_cancel(session: *mut c_void);
+    fn tas_record_flags(session: *mut c_void) -> i32;
+    fn tas_video_probe(path: *const c_char, err_out: *mut *mut c_char) -> *mut c_char;
+    fn tas_video_poster(
+        src: *const c_char,
+        dst: *const c_char,
+        err_out: *mut *mut c_char,
+    ) -> bool;
+    fn tas_record_free(p: *mut c_char);
+}
+
+/// Takes ownership of a shim error string, if there is one.
+unsafe fn take_err(err: *mut c_char) -> Option<String> {
+    if err.is_null() {
+        return None;
+    }
+    let s = CStr::from_ptr(err).to_string_lossy().into_owned();
+    tas_record_free(err);
+    Some(s)
+}
+
+unsafe fn take_string(ptr: *mut c_char) -> Option<String> {
+    if ptr.is_null() {
+        return None;
+    }
+    let s = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+    tas_record_free(ptr);
+    Some(s)
+}
+
+fn c_path(path: &Path) -> RecordResult<CString> {
+    CString::new(path.to_string_lossy().as_bytes())
+        .map_err(|_| RecordError::Backend("that path contains a NUL byte".into()))
+}
+
+/// The opaque ObjC session, plus what Rust needs to answer `elapsed` without
+/// crossing the FFI on a timer tick.
+struct MacRecording {
+    session: *mut c_void,
+    started: Instant,
+    warnings: Vec<String>,
+}
+
+// The ObjC side serializes every touch of the session onto its own dispatch
+// queue, and the pointer is only ever used from the recording thread that
+// owns this value.
+unsafe impl Send for MacRecording {}
+
+impl ActiveRecording for MacRecording {
+    fn stop(self: Box<Self>) -> RecordResult<PathBuf> {
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let out = unsafe { tas_record_stop(self.session, &mut err) };
+        if let Some(message) = unsafe { take_err(err) } {
+            return Err(RecordError::Backend(message));
+        }
+        let path = unsafe { take_string(out) }
+            .ok_or_else(|| RecordError::Backend("the recording produced no file".into()))?;
+        Ok(PathBuf::from(path))
+    }
+
+    fn cancel(self: Box<Self>) {
+        unsafe { tas_record_cancel(self.session) };
+    }
+
+    fn elapsed(&self) -> Duration {
+        self.started.elapsed()
+    }
+
+    fn warnings(&self) -> Vec<String> {
+        self.warnings.clone()
+    }
+}
+
+pub struct MacBackend;
+
+impl MacBackend {
+    /// Converts a physical-pixel rect in the global virtual-screen space into
+    /// the display-local points ScreenCaptureKit's `sourceRect` wants, plus
+    /// the scale factor the output pixel size is derived from.
+    ///
+    /// Everything crossing this app's IPC is physical pixels (see
+    /// `capture/xcap_backend.rs`), and Core Graphics is entirely in points --
+    /// the same mismatch that made scrolling capture warp the pointer to
+    /// twice the intended spot before it was fixed.
+    fn to_points(cfg: &RecordConfig) -> RecordResult<(f64, f64, f64, f64, f64, u32)> {
+        let monitors = xcap::Monitor::all()
+            .map_err(|e| RecordError::Backend(format!("couldn't list monitors: {e}")))?;
+        let monitor = monitors
+            .iter()
+            .find(|m| m.id().map(|id| id == cfg.monitor_id).unwrap_or(false))
+            .ok_or_else(|| {
+                RecordError::Backend("the monitor being recorded is no longer attached".into())
+            })?;
+
+        let scale = monitor.scale_factor().unwrap_or(1.0) as f64;
+        let origin_x = monitor.x().unwrap_or(0) as f64;
+        let origin_y = monitor.y().unwrap_or(0) as f64;
+
+        // `rect` is physical and global; `sourceRect` is points and relative
+        // to the display's own top-left.
+        let x_pt = cfg.rect.x as f64 / scale - origin_x;
+        let y_pt = cfg.rect.y as f64 / scale - origin_y;
+        let w_pt = cfg.rect.w as f64 / scale;
+        let h_pt = cfg.rect.h as f64 / scale;
+
+        let display_id = monitor
+            .id()
+            .map_err(|e| RecordError::Backend(format!("couldn't read the monitor id: {e}")))?;
+
+        Ok((x_pt, y_pt, w_pt, h_pt, scale, display_id))
+    }
+}
+
+impl VideoBackend for MacBackend {
+    fn start_recording(&self, cfg: &RecordConfig) -> RecordResult<Box<dyn ActiveRecording>> {
+        let (x_pt, y_pt, w_pt, h_pt, scale, display_id) = Self::to_points(cfg)?;
+
+        if let Some(parent) = cfg.out_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let out = c_path(&cfg.out_path)?;
+
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let session = unsafe {
+            tas_record_start(
+                display_id,
+                x_pt,
+                y_pt,
+                w_pt,
+                h_pt,
+                scale,
+                cfg.fps,
+                cfg.show_cursor,
+                cfg.system_audio,
+                cfg.microphone,
+                out.as_ptr(),
+                &mut err,
+            )
+        };
+        if let Some(message) = unsafe { take_err(err) } {
+            // Screen Recording denial reads as a plain backend failure from
+            // the shim, but it is the one the user can actually act on.
+            if message.contains("Screen Recording") {
+                return Err(RecordError::Permission(message));
+            }
+            return Err(RecordError::Backend(message));
+        }
+        if session.is_null() {
+            return Err(RecordError::Backend(
+                "the recording didn't start, and macOS gave no reason".into(),
+            ));
+        }
+
+        let flags = unsafe { tas_record_flags(session) };
+        let mut warnings = Vec::new();
+        if flags & FLAG_MIC_DENIED != 0 {
+            warnings.push(
+                "Microphone access denied -- recording without it. Turn it on in System Settings > \
+                 Privacy & Security > Microphone."
+                    .into(),
+            );
+        }
+        if flags & FLAG_MIC_FAILED != 0 {
+            warnings.push("No microphone was available -- recording without it.".into());
+        }
+
+        Ok(Box::new(MacRecording {
+            session,
+            started: Instant::now(),
+            warnings,
+        }))
+    }
+
+    fn probe(&self, path: &Path) -> RecordResult<VideoInfo> {
+        let c = c_path(path)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let out = unsafe { tas_video_probe(c.as_ptr(), &mut err) };
+        if let Some(message) = unsafe { take_err(err) } {
+            return Err(RecordError::Backend(message));
+        }
+        let row = unsafe { take_string(out) }
+            .ok_or_else(|| RecordError::Backend("couldn't read that movie".into()))?;
+        parse_probe(&row)
+    }
+
+    fn decode_frames(
+        &self,
+        _path: &Path,
+        _range: TimeRange,
+        _fps: u32,
+        _on_frame: &mut dyn FnMut(RgbaFrame) -> bool,
+    ) -> RecordResult<()> {
+        Err(RecordError::Unsupported(
+            "decoding isn't wired up yet".into(),
+        ))
+    }
+
+    fn transcode(
+        &self,
+        _src: &Path,
+        _dst: &Path,
+        _opts: &TranscodeOptions,
+        _process: &mut dyn FnMut(RgbaFrame) -> Option<RgbaFrame>,
+    ) -> RecordResult<()> {
+        Err(RecordError::Unsupported(
+            "exporting isn't wired up yet".into(),
+        ))
+    }
+
+    fn poster(&self, src: &Path, dst: &Path) -> RecordResult<()> {
+        let (s, d) = (c_path(src)?, c_path(dst)?);
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let ok = unsafe { tas_video_poster(s.as_ptr(), d.as_ptr(), &mut err) };
+        if let Some(message) = unsafe { take_err(err) } {
+            return Err(RecordError::Backend(message));
+        }
+        if !ok {
+            return Err(RecordError::Backend(
+                "couldn't make a thumbnail for that recording".into(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Parses the shim's tab-separated probe row. Split out so the parsing is
+/// testable without a movie file.
+fn parse_probe(row: &str) -> RecordResult<VideoInfo> {
+    let cols: Vec<&str> = row.split('\t').collect();
+    if cols.len() < 5 {
+        return Err(RecordError::Backend(format!(
+            "couldn't understand this movie's details: {row:?}"
+        )));
+    }
+    let num = |i: usize| -> RecordResult<f64> {
+        cols[i]
+            .parse::<f64>()
+            .map_err(|_| RecordError::Backend(format!("couldn't understand {:?}", cols[i])))
+    };
+    Ok(VideoInfo {
+        width: num(0)? as u32,
+        height: num(1)? as u32,
+        duration_ms: num(2)?.max(0.0) as u64,
+        fps: num(3)? as f32,
+        has_audio: cols[4] == "1",
+    })
+}
+
+/// Unused today; kept so the frame-conversion helper the decode path will
+/// need has one home rather than being written twice.
+#[allow(dead_code)]
+pub(crate) fn bgra_to_rgba(bgra: &[u8], width: u32, height: u32, stride: usize) -> Option<RgbaImage> {
+    let mut out = RgbaImage::new(width, height);
+    for y in 0..height as usize {
+        let row = &bgra.get(y * stride..y * stride + width as usize * 4)?;
+        for x in 0..width as usize {
+            let p = &row[x * 4..x * 4 + 4];
+            out.put_pixel(
+                x as u32,
+                y as u32,
+                image::Rgba([p[2], p[1], p[0], p[3]]),
+            );
+        }
+    }
+    Some(out)
+}
+
+/// Frame counter used by the live tests to assert a decode produced frames.
+#[allow(dead_code)]
+static DECODED: AtomicU64 = AtomicU64::new(0);
+
+#[allow(dead_code)]
+pub(crate) fn note_decoded() {
+    DECODED.fetch_add(1, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_a_probe_row() {
+        let info = parse_probe("1600\t1000\t4200\t30.000\t1\t2").expect("parse");
+        assert_eq!((info.width, info.height), (1600, 1000));
+        assert_eq!(info.duration_ms, 4200);
+        assert!((info.fps - 30.0).abs() < 0.01);
+        assert!(info.has_audio);
+    }
+
+    #[test]
+    fn probe_without_audio_reads_false() {
+        let info = parse_probe("800\t600\t1000\t60.000\t0\t0").expect("parse");
+        assert!(!info.has_audio);
+    }
+
+    #[test]
+    fn a_short_probe_row_is_an_error() {
+        assert!(parse_probe("800\t600").is_err());
+    }
+
+    #[test]
+    fn bgra_converts_channel_order() {
+        // One pixel, BGRA -> RGBA.
+        let px = [10u8, 20, 30, 255];
+        let img = bgra_to_rgba(&px, 1, 1, 4).expect("convert");
+        assert_eq!(img.get_pixel(0, 0).0, [30, 20, 10, 255]);
+    }
+}
+
+/// Live tests: these drive the real ScreenCaptureKit path and need Screen
+/// Recording permission, so they are `#[ignore]`d and run with
+/// `cargo test -- --ignored`.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use crate::geometry::PhysRect;
+
+    fn temp_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(name)
+    }
+
+    #[test]
+    #[ignore]
+    fn records_two_seconds() {
+        let monitors = xcap::Monitor::all().expect("monitors");
+        let primary = monitors
+            .iter()
+            .find(|m| m.is_primary().unwrap_or(false))
+            .or_else(|| monitors.first())
+            .expect("a monitor");
+        let scale = primary.scale_factor().unwrap_or(1.0) as f64;
+        let id = primary.id().expect("id");
+
+        // 400x300 points at the display's top-left, expressed physically.
+        let rect = PhysRect::new(
+            (primary.x().unwrap_or(0) as f64 * scale) as i32,
+            (primary.y().unwrap_or(0) as f64 * scale) as i32,
+            (400.0 * scale) as u32,
+            (300.0 * scale) as u32,
+        );
+        let out = temp_path("slickshot-live-record.mp4");
+
+        let backend = MacBackend;
+        let recording = backend
+            .start_recording(&RecordConfig {
+                rect,
+                monitor_id: id,
+                fps: 30,
+                show_cursor: true,
+                system_audio: false,
+                microphone: false,
+                out_path: out.clone(),
+            })
+            .expect("start");
+
+        std::thread::sleep(Duration::from_secs(2));
+        let path = recording.stop().expect("stop");
+
+        let info = backend.probe(&path).expect("probe");
+        assert_eq!(
+            (info.width, info.height),
+            ((400.0 * scale) as u32, (300.0 * scale) as u32),
+            "the file's pixel size must match the requested region"
+        );
+        assert!(
+            (1_700..=2_400).contains(&info.duration_ms),
+            "expected about 2s, got {}ms",
+            info.duration_ms
+        );
+        assert!(!info.has_audio);
+        let _ = std::fs::remove_file(&path);
+    }
+
+
+
+
+}

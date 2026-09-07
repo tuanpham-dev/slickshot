@@ -14,6 +14,7 @@ import {
   Ruler,
   ArrowLeft,
   ScrollText,
+  Video,
   History as HistoryIcon,
 } from "lucide-react";
 import {
@@ -471,6 +472,16 @@ export function MainWindow() {
                 label="Scrolling capture"
                 shortcut={shortcutFor("scroll")}
                 onClick={() => trigger("scroll")}
+                disabled={busy}
+              />
+            </div>
+            <div className="col-span-2">
+              <ModeTile
+                compact
+                icon={<Video size={18} />}
+                label="Record screen"
+                shortcut={shortcutFor("record")}
+                onClick={() => trigger("record")}
                 disabled={busy}
               />
             </div>

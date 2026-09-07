@@ -115,6 +115,23 @@ pub(crate) fn quicksave_file(settings: &crate::settings::Settings) -> std::path:
     dir.join(filename)
 }
 
+/// Where a finished recording is quick-saved: the same folder screenshots go
+/// to, named to be obviously distinct from them in a directory listing.
+/// Always `.mp4` -- `default_format` is about still images, and a recording
+/// has only one container.
+pub(crate) fn recording_quicksave_file(settings: &crate::settings::Settings) -> std::path::PathBuf {
+    let dir = settings
+        .save_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::picture_dir()
+                .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
+                .join("Screenshots")
+        });
+    dir.join(format!("Recording {}.mp4", filename_timestamp()))
+}
+
 /// Writes `image` to the configured save folder under a timestamped name and
 /// notifies, returning the path. Shared by the quicksave export action, the
 /// quicksave capture mode, and the auto-save that keeps a capture nothing

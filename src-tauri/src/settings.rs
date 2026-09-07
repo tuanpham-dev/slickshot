@@ -116,6 +116,28 @@ fn default_capture_history() -> bool {
     true
 }
 
+fn default_record_fps() -> u32 {
+    30
+}
+
+fn default_record_show_cursor() -> bool {
+    true
+}
+
+fn default_gif_fps() -> u32 {
+    15
+}
+
+fn default_gif_max_width() -> u32 {
+    720
+}
+
+/// Recordings are tens of megabytes each, so they get a much lower ceiling
+/// than the 100 images history keeps -- a hundred of them would be gigabytes.
+fn default_history_video_limit() -> u32 {
+    20
+}
+
 /// The tools the capture overlay offers for quick markup: enough to annotate
 /// without opening the editor, few enough that the bar stays a bar.
 fn default_overlay_tools() -> Vec<String> {
@@ -268,6 +290,31 @@ pub struct Settings {
         deserialize_with = "deserialize_overlay_tools"
     )]
     pub overlay_tools: Vec<String>,
+    /// Frames per second a screen recording is captured at.
+    #[serde(default = "default_record_fps")]
+    pub record_fps: u32,
+    /// Whether the pointer is drawn into a recording. macOS only -- the
+    /// Windows and Linux frame sources have no cursor of their own to draw.
+    #[serde(default = "default_record_show_cursor")]
+    pub record_show_cursor: bool,
+    /// Defaults for the recording overlay's two audio toggles. Both off:
+    /// capturing what the machine is playing, or the room, should be a
+    /// deliberate choice each time rather than a surprise in the first file.
+    #[serde(default)]
+    pub record_system_audio: bool,
+    #[serde(default)]
+    pub record_microphone: bool,
+    /// Frame rate and width cap for GIF export. A GIF at the recording's own
+    /// rate and size is enormous and plays badly, so both are deliberately
+    /// lower than the source.
+    #[serde(default = "default_gif_fps")]
+    pub gif_fps: u32,
+    #[serde(default = "default_gif_max_width")]
+    pub gif_max_width: u32,
+    /// How many recordings capture history keeps before evicting the oldest,
+    /// counted separately from images.
+    #[serde(default = "default_history_video_limit")]
+    pub history_video_limit: u32,
 }
 
 impl Default for Settings {
@@ -302,6 +349,13 @@ impl Default for Settings {
             auto_check_updates: default_auto_check_updates(),
             capture_history: default_capture_history(),
             overlay_tools: default_overlay_tools(),
+            record_fps: default_record_fps(),
+            record_show_cursor: default_record_show_cursor(),
+            record_system_audio: false,
+            record_microphone: false,
+            gif_fps: default_gif_fps(),
+            gif_max_width: default_gif_max_width(),
+            history_video_limit: default_history_video_limit(),
         }
     }
 }
@@ -440,6 +494,32 @@ mod tests {
 
         let settings: Settings = serde_json::from_value(old_json).expect("must still deserialize");
         assert!(settings.capture_history);
+    }
+
+    /// Every recording field arrived after 1.0, so a settings file written by
+    /// any released build has none of them -- it must still load, with
+    /// recording usable and both audio sources off.
+    #[test]
+    fn old_settings_json_without_record_fields_deserializes() {
+        let old_json = serde_json::json!({
+            "save_dir": null,
+            "default_format": "png",
+            "jpeg_quality": 90,
+            "hotkeys": [],
+            "default_delay_ms": 0,
+            "open_editor_after_capture": true,
+            "copy_on_capture": false,
+            "theme": "system"
+        });
+
+        let settings: Settings = serde_json::from_value(old_json).expect("must still deserialize");
+        assert_eq!(settings.record_fps, 30);
+        assert!(settings.record_show_cursor);
+        assert!(!settings.record_system_audio, "audio is opt-in");
+        assert!(!settings.record_microphone, "audio is opt-in");
+        assert_eq!(settings.gif_fps, 15);
+        assert_eq!(settings.gif_max_width, 720);
+        assert_eq!(settings.history_video_limit, 20);
     }
 
     /// A `settings.json` predating the capture overlay's quick tools must

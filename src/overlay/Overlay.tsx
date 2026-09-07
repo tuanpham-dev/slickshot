@@ -5,7 +5,7 @@ import {
   requestPermission,
   sendNotification,
 } from "@tauri-apps/plugin-notification";
-import { Check, Copy, Download, Loader2, Pencil, Pin as PinIcon, X } from "lucide-react";
+import { Check, Copy, Download, Loader2, Mic, Pencil, Pin as PinIcon, Volume2, X } from "lucide-react";
 import {
   listMonitors,
   listWindows,
@@ -13,6 +13,7 @@ import {
   onOverlayShapes,
   overlaySetShapes,
   scrollStart,
+  recordStart,
   releaseImage,
   selectionSetDest,
   selectionRegionImage,
@@ -36,6 +37,7 @@ import {
   ocrListLangs,
   ocrDownloadLang,
   getSettings,
+  isMac,
   translateServiceAvailable,
   ISO_TO_OCR_LANG,
   normalizeDetectedLang,
@@ -89,7 +91,7 @@ interface OverlayProps {
 
 interface OverlayFrame {
   image_id: string;
-  mode: "region" | "scroll" | "window" | "translate" | "color" | "measure";
+  mode: "region" | "scroll" | "record" | "window" | "translate" | "color" | "measure";
   /** Previous capture's region, already clipped to the current screen by
    * Rust. Present only for region mode, and only when there is one. */
   seed_rect: PhysRect | null;
@@ -225,6 +227,11 @@ export function Overlay({ params }: OverlayProps) {
   /** What Confirm will do with the capture, read per session like the tools
    * above. Only "editor" changes how annotations travel. */
   const [postCapture, setPostCapture] = useState<AppSettings["post_capture"]>("editor");
+  // Recording's two audio sources. Seeded from settings when record mode
+  // opens, then toggled per recording -- the choice usually differs between
+  // a silent UI clip and a narrated walkthrough.
+  const [systemAudio, setSystemAudio] = useState(false);
+  const [microphone, setMicrophone] = useState(false);
   /** The annotation under edit. Set when one is drawn or picked, and what
    * makes the settings dropdown edit *that shape* rather than only the next
    * one drawn. */
@@ -258,9 +265,13 @@ export function Overlay({ params }: OverlayProps) {
   const colorMode = frame?.mode === "color";
   const measureMode = frame?.mode === "measure";
   const scrollMode = frame?.mode === "scroll";
+  const recordMode = frame?.mode === "record";
+  // Recording picks a target exactly like scrolling capture does -- drag a
+  // region or click a window -- and differs only in what confirm starts.
+  const liveMode = scrollMode || recordMode;
   // Scroll mode is a region selection in every respect except what confirm
   // does with it, so it shares the selection gestures and edge snapping.
-  const regionMode = frame?.mode === "region" || scrollMode;
+  const regionMode = frame?.mode === "region" || liveMode;
 
   const scheduleCursor = useCallback((next: CursorState | null) => {
     pendingCursorRef.current = next;
@@ -337,7 +348,8 @@ export function Overlay({ params }: OverlayProps) {
         if (
           e.payload.mode === "window" ||
           e.payload.mode === "region" ||
-          e.payload.mode === "scroll"
+          e.payload.mode === "scroll" ||
+          e.payload.mode === "record"
         ) {
           listWindows().then(setWindows);
         }
@@ -348,6 +360,14 @@ export function Overlay({ params }: OverlayProps) {
               setPostCapture(s.post_capture);
             })
             .catch(() => setOverlayTools([]));
+        }
+        if (e.payload.mode === "record") {
+          getSettings()
+            .then((s) => {
+              setSystemAudio(s.record_system_audio);
+              setMicrophone(s.record_microphone);
+            })
+            .catch(() => {});
         }
         if (e.payload.mode === "translate") {
           getSettings()
@@ -876,7 +896,7 @@ export function Overlay({ params }: OverlayProps) {
       // highlights them on hover; plain region mode still asks for Ctrl so an
       // ordinary drag cannot jump to a window by accident.
       const canSnap =
-        (scrollMode || e.ctrlKey) && !(selection && rectContains(selection, p));
+        (liveMode || e.ctrlKey) && !(selection && rectContains(selection, p));
       setHoveredWindow(canSnap ? windowAt(p) : null);
     }
     if (mode === "draw") {
@@ -991,7 +1011,7 @@ export function Overlay({ params }: OverlayProps) {
 
     // Ctrl+click (rather than a drag) on a window in region mode snaps the
     // selection to that window's bounds, still editable and confirmable.
-    if (regionMode && mode === "draw" && (e.ctrlKey || scrollMode)) {
+    if (regionMode && mode === "draw" && (e.ctrlKey || liveMode)) {
       const p = toPhys(e.clientX, e.clientY);
       const press = pressPointRef.current;
       const travelled =
@@ -1169,7 +1189,7 @@ export function Overlay({ params }: OverlayProps) {
   // move the bar. Only used to keep it on screen, so an approximation within a
   // few pixels is fine -- it just has to track the real content.
   const quickToolsWidth = (overlayTools.length + 1) * 32 + 24 + 90;
-  const showQuickTools = regionMode && !scrollMode && editable && sel !== null && overlayTools.length > 0;
+  const showQuickTools = regionMode && !liveMode && editable && sel !== null && overlayTools.length > 0;
   /** The quick-tools bar, preferring above the selection. Placed first so the
    * action cluster can step around it. */
   const quickTools =
@@ -1273,10 +1293,14 @@ export function Overlay({ params }: OverlayProps) {
     try {
       // Scrolling capture takes over from here: Rust hides the overlays,
       // scrolls the content and stitches, so there is nothing to composite.
-      if (scrollMode) {
+      if (liveMode) {
         if (rect) {
           try {
-            await scrollStart(rect);
+            if (recordMode) {
+              await recordStart(rect, systemAudio, microphone);
+            } else {
+              await scrollStart(rect);
+            }
           } catch (err) {
             // The overlay is still up and the selection has been cleared, so
             // without this the user is silently back at "pick a window" with
@@ -1513,7 +1537,33 @@ export function Overlay({ params }: OverlayProps) {
           />
           {/* Scrolling capture has no image yet, so pin/copy/save/edit have
             * nothing to act on -- it offers only cancel and start. */}
-          {!scrollMode && (
+          {recordMode && (
+            <>
+              {/* Audio capture is macOS-only for now, so the toggles only
+                * appear where they can actually do something. */}
+              {isMac && (
+                <>
+                  <IconButton
+                    label={systemAudio ? "System audio on" : "System audio off"}
+                    icon={<Volume2 size={16} />}
+                    variant={systemAudio ? "primary" : "secondary"}
+                    size="md"
+                    className="shadow-[var(--shadow-md)]"
+                    onClick={() => setSystemAudio((on) => !on)}
+                  />
+                  <IconButton
+                    label={microphone ? "Microphone on" : "Microphone off"}
+                    icon={<Mic size={16} />}
+                    variant={microphone ? "primary" : "secondary"}
+                    size="md"
+                    className="shadow-[var(--shadow-md)]"
+                    onClick={() => setMicrophone((on) => !on)}
+                  />
+                </>
+              )}
+            </>
+          )}
+          {!liveMode && (
             <>
           <IconButton
             label="Pin to screen"
@@ -1553,7 +1603,7 @@ export function Overlay({ params }: OverlayProps) {
             </>
           )}
           <IconButton
-            label={scrollMode ? "Start scrolling capture" : "Confirm capture"}
+            label={recordMode ? "Start recording" : scrollMode ? "Start scrolling capture" : "Confirm capture"}
             icon={<Check size={18} />}
             variant="primary"
             size="md"
@@ -1812,6 +1862,10 @@ export function Overlay({ params }: OverlayProps) {
                   ? translateEnabled
                     ? "Drag to select a region to translate · Esc to exit"
                     : "Drag to select a region to extract text · Esc to exit"
+                  : recordMode
+                    ? editable
+                      ? "Enter to start recording this region · Esc to cancel"
+                      : "Click a window to record it, or drag a region · Esc to cancel"
                   : scrollMode
                     ? editable
                       ? "Enter to start scrolling this region · Esc to cancel"

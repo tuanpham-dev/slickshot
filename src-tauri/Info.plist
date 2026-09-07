@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Merged into the bundle's own Info.plist by Tauri at build time.
+
+  macOS refuses to even show the microphone permission prompt without a usage
+  string, and kills the process instead -- so a recording with the microphone
+  toggle on would crash the app rather than ask.
+-->
+<plist version="1.0">
+<dict>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SlickShot records your microphone when you turn the microphone toggle on for a screen recording.</string>
+</dict>
+</plist>

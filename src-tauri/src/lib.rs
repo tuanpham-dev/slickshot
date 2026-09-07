@@ -14,6 +14,8 @@ mod overlay;
 mod pin;
 mod qr;
 mod ready;
+mod record;
+mod recording;
 mod scroll;
 mod selection;
 mod session;
@@ -24,6 +26,7 @@ mod tray;
 mod update;
 mod translate;
 mod upload;
+mod video;
 
 use std::sync::{Mutex, OnceLock};
 
@@ -93,6 +96,9 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .manage(thumbnail::ThumbnailImage::default())
         .manage(update::PendingUpdate::default())
         .manage(ready::MountedWindows::default())
+        .manage(recording::RecordSession::default())
+        .manage(recording::RecordCliOptions::default())
+        .manage(video::VideoStore::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_monitors,
             commands::list_windows,
@@ -123,6 +129,12 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             selection::selection_region_image,
             selection::selection_confirm_to_editor,
             editor::take_pending_shapes,
+            recording::record_start,
+            recording::record_stop,
+            recording::record_cancel,
+            video::video_probe,
+            video::video_discard,
+            video::video_reveal,
             scroll::scroll_start,
             scroll::scroll_stop,
             scroll::scroll_cancel,
@@ -172,6 +184,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             let _ = APP_HANDLE.set(handle.clone());
             tray::setup(&handle)?;
             update::check_in_background(&handle);
+            recording::sweep_stale(&handle);
             settings::init_hotkeys(&handle).map_err(|e| e.to_string())?;
             if let Err(e) = overlay::prewarm(&handle) {
                 eprintln!("[startup] failed to pre-warm overlay windows: {e}");
@@ -206,6 +219,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         });
 
     let builder = images::register_shot_protocol(builder);
+    let builder = video::register_video_protocol(builder);
 
     builder
         .run(tauri::generate_context!())

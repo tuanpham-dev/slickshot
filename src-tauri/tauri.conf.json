@@ -24,7 +24,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' slickshot: http://slickshot.localhost data:; connect-src 'self' slickshot: http://slickshot.localhost ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:"
+      "csp": "default-src 'self'; img-src 'self' slickshot: http://slickshot.localhost data:; connect-src 'self' slickshot: http://slickshot.localhost ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; font-src 'self' data:; media-src 'self' slickshot-video: http://slickshot-video.localhost"
     }
   },
   "bundle": {
@@ -57,7 +57,10 @@
         ]
       }
     },
-    "createUpdaterArtifacts": true
+    "createUpdaterArtifacts": true,
+    "macOS": {
+      "minimumSystemVersion": "13.0"
+    }
   },
   "plugins": {
     "updater": {

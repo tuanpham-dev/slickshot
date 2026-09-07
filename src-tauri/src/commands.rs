@@ -33,6 +33,8 @@ pub enum CaptureMode {
     /// editor entirely.
     #[serde(rename = "region_quicksave")]
     RegionQuicksave,
+    /// Picks a region or a window, then records it to an MP4 until stopped.
+    Record,
 }
 
 /// Set while a `RegionQuicksave` capture is in flight, so the shared
@@ -349,6 +351,7 @@ pub async fn run_capture(
         CaptureMode::Region
         | CaptureMode::RegionQuicksave
         | CaptureMode::Scroll
+        | CaptureMode::Record
         | CaptureMode::Window
         | CaptureMode::Translate
         | CaptureMode::Color
@@ -376,6 +379,7 @@ pub async fn run_capture(
         CaptureMode::Region
             | CaptureMode::RegionQuicksave
             | CaptureMode::Scroll
+            | CaptureMode::Record
             | CaptureMode::Window
             | CaptureMode::Translate
             | CaptureMode::Color
