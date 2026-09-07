@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use image::RgbaImage;
 
 use super::{
-    ActiveRecording, RecordConfig, RecordError, RecordResult, RgbaFrame, TimeRange,
+    ActiveRecording, RecordConfig, RecordError, RecordResult, RgbaFrame, TimeRange, TrackOffsets,
     TranscodeOptions, VideoBackend, VideoInfo,
 };
 
@@ -35,6 +35,7 @@ extern "C" {
     fn tas_record_cancel(session: *mut c_void);
     fn tas_record_flags(session: *mut c_void) -> i32;
     fn tas_video_probe(path: *const c_char, err_out: *mut *mut c_char) -> *mut c_char;
+    fn tas_video_track_offsets(path: *const c_char, err_out: *mut *mut c_char) -> *mut c_char;
     fn tas_video_poster(
         src: *const c_char,
         dst: *const c_char,
@@ -241,6 +242,18 @@ impl VideoBackend for MacBackend {
         ))
     }
 
+    fn track_offsets(&self, path: &Path) -> RecordResult<Vec<TrackOffsets>> {
+        let c = c_path(path)?;
+        let mut err: *mut c_char = std::ptr::null_mut();
+        let out = unsafe { tas_video_track_offsets(c.as_ptr(), &mut err) };
+        if let Some(message) = unsafe { take_err(err) } {
+            return Err(RecordError::Backend(message));
+        }
+        let text = unsafe { take_string(out) }
+            .ok_or_else(|| RecordError::Backend("couldn't read that movie".into()))?;
+        parse_track_offsets(&text)
+    }
+
     fn poster(&self, src: &Path, dst: &Path) -> RecordResult<()> {
         let (s, d) = (c_path(src)?, c_path(dst)?);
         let mut err: *mut c_char = std::ptr::null_mut();
@@ -277,7 +290,35 @@ fn parse_probe(row: &str) -> RecordResult<VideoInfo> {
         duration_ms: num(2)?.max(0.0) as u64,
         fps: num(3)? as f32,
         has_audio: cols[4] == "1",
+        // Older shim rows stopped at `has_audio`; fall back to what that
+        // implies rather than refusing to parse.
+        audio_tracks: match cols.get(5) {
+            Some(n) => n.parse::<u32>().unwrap_or(0),
+            None => u32::from(cols[4] == "1"),
+        },
     })
+}
+
+/// One row per track: `index\tfirst_pts_ms\tlast_pts_ms\tsamples`.
+fn parse_track_offsets(text: &str) -> RecordResult<Vec<TrackOffsets>> {
+    text.lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let cols: Vec<&str> = line.split('\t').collect();
+            if cols.len() < 4 {
+                return Err(RecordError::Backend(format!(
+                    "couldn't understand this track's timing: {line:?}"
+                )));
+            }
+            let bad = |c: &str| RecordError::Backend(format!("couldn't understand {c:?}"));
+            Ok(TrackOffsets {
+                index: cols[0].parse().map_err(|_| bad(cols[0]))?,
+                first_pts_ms: cols[1].parse().map_err(|_| bad(cols[1]))?,
+                last_pts_ms: cols[2].parse().map_err(|_| bad(cols[2]))?,
+                samples: cols[3].parse().map_err(|_| bad(cols[3]))?,
+            })
+        })
+        .collect()
 }
 
 /// Unused today; kept so the frame-conversion helper the decode path will
@@ -330,6 +371,51 @@ mod tests {
     #[test]
     fn a_short_probe_row_is_an_error() {
         assert!(parse_probe("800\t600").is_err());
+    }
+
+    #[test]
+    fn probe_reports_the_track_count() {
+        assert_eq!(
+            parse_probe("1600\t1000\t4200\t30.000\t1\t2")
+                .expect("parse")
+                .audio_tracks,
+            2
+        );
+        assert_eq!(
+            parse_probe("1600\t1000\t4200\t30.000\t1\t1")
+                .expect("parse")
+                .audio_tracks,
+            1
+        );
+    }
+
+    #[test]
+    fn a_probe_row_without_a_track_count_falls_back_to_has_audio() {
+        let info = parse_probe("1600\t1000\t4200\t30.000\t1").expect("parse");
+        assert_eq!(info.audio_tracks, 1, "audio, so at least one track");
+        let silent = parse_probe("1600\t1000\t4200\t30.000\t0").expect("parse");
+        assert_eq!(silent.audio_tracks, 0);
+    }
+
+    #[test]
+    fn parses_track_offsets() {
+        let tracks = parse_track_offsets("0\t0.000\t5000.500\t240\n1\t12.750\t5008.125\t235")
+            .expect("parse");
+        assert_eq!(tracks.len(), 2);
+        assert_eq!(tracks[0].index, 0);
+        assert_eq!(tracks[0].samples, 240);
+        assert!((tracks[1].first_pts_ms - 12.75).abs() < 1e-6);
+        assert!((tracks[1].last_pts_ms - 5008.125).abs() < 1e-6);
+    }
+
+    #[test]
+    fn no_audio_tracks_parses_as_empty() {
+        assert!(parse_track_offsets("").expect("parse").is_empty());
+    }
+
+    #[test]
+    fn a_short_track_row_is_an_error() {
+        assert!(parse_track_offsets("0\t1.0").is_err());
     }
 
     #[test]
@@ -405,7 +491,122 @@ mod live_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    /// A small region on the primary display, expressed physically -- the
+    /// units every rect crossing this app's IPC uses.
+    fn live_test_region() -> (PhysRect, u32) {
+        let monitors = xcap::Monitor::all().expect("monitors");
+        let primary = monitors
+            .iter()
+            .find(|m| m.is_primary().unwrap_or(false))
+            .or_else(|| monitors.first())
+            .expect("a monitor");
+        let scale = primary.scale_factor().unwrap_or(1.0) as f64;
+        let rect = PhysRect::new(
+            (primary.x().unwrap_or(0) as f64 * scale) as i32,
+            (primary.y().unwrap_or(0) as f64 * scale) as i32,
+            (400.0 * scale) as u32,
+            (300.0 * scale) as u32,
+        );
+        (rect, primary.id().expect("id"))
+    }
 
+    /// Live: records with both audio sources and checks the file really has
+    /// two separate tracks.
+    ///
+    /// Needs Screen Recording *and* Microphone permission, and a default input
+    /// device; run it by hand with
+    /// `cargo test records_with_system_audio_and_mic -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn records_with_system_audio_and_mic() {
+        let (rect, monitor_id) = live_test_region();
+        let out = temp_path("slickshot-live-record-audio.mp4");
+        let backend = MacBackend;
 
+        let recording = backend
+            .start_recording(&RecordConfig {
+                rect,
+                monitor_id,
+                fps: 30,
+                show_cursor: true,
+                system_audio: true,
+                microphone: true,
+                out_path: out.clone(),
+            })
+            .expect("start");
 
+        // Surfaced rather than asserted away: without microphone permission
+        // the recording is still valid, just single-track, and the reason
+        // should be readable in the test output instead of showing up as a
+        // baffling "expected 2 tracks, got 1".
+        let warnings = recording.warnings();
+        for w in &warnings {
+            println!("warning: {w}");
+        }
+
+        // Long runs are how drift is told apart from a fixed start-up offset,
+        // so the length is a knob rather than a recompile.
+        let seconds: u64 = std::env::var("SLICKSHOT_LIVE_RECORD_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(5);
+        println!("recording for {seconds}s");
+        std::thread::sleep(Duration::from_secs(seconds));
+        let path = recording.stop().expect("stop");
+
+        let info = backend.probe(&path).expect("probe");
+        println!(
+            "probe: {}x{} {}ms {:.3}fps audio={} tracks={}",
+            info.width, info.height, info.duration_ms, info.fps, info.has_audio, info.audio_tracks
+        );
+        assert!(info.has_audio, "system audio was requested but none landed");
+
+        let tracks = backend.track_offsets(&path).expect("track offsets");
+        for t in &tracks {
+            println!(
+                "track {}: first={:.3}ms last={:.3}ms samples={}",
+                t.index, t.first_pts_ms, t.last_pts_ms, t.samples
+            );
+        }
+
+        if warnings.is_empty() {
+            assert_eq!(
+                info.audio_tracks, 2,
+                "system audio and microphone should be two separate tracks"
+            );
+            assert_eq!(tracks.len(), 2);
+            // Both inputs are stamped against the screen stream's clock, so
+            // they should begin and end together. 20ms is well under a frame
+            // at 30fps -- past that, the drift correction is not working.
+            let start_skew = (tracks[1].first_pts_ms - tracks[0].first_pts_ms).abs();
+            let end_skew = (tracks[1].last_pts_ms - tracks[0].last_pts_ms).abs();
+            println!("skew: start={start_skew:.3}ms end={end_skew:.3}ms");
+            // Where the two tracks *end* is ragged by construction: one AAC
+            // packet is already 21ms, the microphone needs ~100ms to spin up,
+            // and stopping marks the two inputs finished microseconds apart.
+            // What would be a bug is that gap growing with the recording's
+            // length -- measured at 83ms over 5s and 69ms over 60s, so it does
+            // not accumulate. Sample-level alignment is checked separately by
+            // cross-correlating a click track (scripts/check_track_sync.py).
+            assert!(
+                end_skew < 200.0,
+                "the tracks ended {end_skew:.3}ms apart, far past a boundary effect"
+            );
+        } else {
+            assert_eq!(
+                info.audio_tracks, 1,
+                "with the microphone unavailable, only system audio should be written"
+            );
+        }
+
+        for t in &tracks {
+            assert!(t.samples > 0, "track {} carries no samples", t.index);
+        }
+        // Kept when asked for, so the sync script has something to analyse.
+        if std::env::var("SLICKSHOT_LIVE_RECORD_KEEP").is_ok() {
+            println!("kept: {}", path.display());
+        } else {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }

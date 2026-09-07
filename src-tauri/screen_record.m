@@ -6,8 +6,8 @@
 // ScreenCaptureKit feeds an AVAssetWriter directly, so H.264 encoding is
 // hardware-accelerated and the region crop happens before a single frame
 // reaches us. System audio rides the same SCStream (macOS 13+); the
-// microphone is a separate AVCaptureSession, resampled onto the stream's
-// clock because the two devices free-run independently.
+// microphone is a separate AVCaptureSession, whose samples are converted onto
+// the host clock so both tracks share the stream's timeline.
 //
 // Compiled by build.rs with the `cc` crate, macOS only.
 
@@ -67,12 +67,6 @@ API_AVAILABLE(macos(13.0))
 @property(nonatomic, assign) CMTime firstPTS;
 @property(nonatomic, assign) NSTimeInterval startedAt;
 @property(nonatomic, assign) int flags;
-// Most recent screen-sample host time, used to measure how far the mic's own
-// clock has drifted from the stream's.
-@property(nonatomic, assign) double lastVideoHostSeconds;
-@property(nonatomic, assign) double micOffsetSeconds;
-@property(nonatomic, assign) BOOL micOffsetPrimed;
-
 @end
 
 @implementation TasRecorder
@@ -84,7 +78,6 @@ API_AVAILABLE(macos(13.0))
         _firstPTS = kCMTimeInvalid;
         _sessionStarted = NO;
         _flags = 0;
-        _micOffsetPrimed = NO;
     }
     return self;
 }
@@ -120,7 +113,6 @@ API_AVAILABLE(macos(13.0))
         if (!image) {
             return;
         }
-        self.lastVideoHostSeconds = CMTimeGetSeconds(pts);
         [self startSessionIfNeeded:pts];
         if (self.videoInput.isReadyForMoreMediaData) {
             [self.adaptor appendPixelBuffer:image withPresentationTime:pts];
@@ -136,11 +128,17 @@ API_AVAILABLE(macos(13.0))
     }
 }
 
-// Microphone samples come from AVCaptureSession, whose clock is not the
-// stream's. Rather than trusting either, the offset between them is measured
-// once and then smoothed, and each buffer is retimed by it -- so a long
-// recording ends with the two tracks still lined up instead of tens of
-// milliseconds apart.
+// Microphone samples come from AVCaptureSession, which stamps them with its
+// own synchronization clock; ScreenCaptureKit stamps with the host clock. The
+// two are converted between explicitly, which is exact and cannot drift.
+//
+// An earlier version instead measured the gap against the last video frame's
+// timestamp. That was wrong for a reason worth recording: SCStream only
+// delivers a frame when the screen actually changes, so on a still region the
+// "current" video time can be hundreds of milliseconds stale, and every
+// microphone buffer was stamped that far into the past. It showed up as the
+// microphone track ending ~390ms before the system-audio track on a static
+// 5-second recording.
 - (void)captureOutput:(AVCaptureOutput *)output
     didOutputSampleBuffer:(CMSampleBufferRef)sampleBuffer
            fromConnection:(AVCaptureConnection *)connection {
@@ -152,23 +150,18 @@ API_AVAILABLE(macos(13.0))
     }
 
     CMTime pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer);
-    double micSeconds = CMTimeGetSeconds(pts);
-    double videoSeconds = self.lastVideoHostSeconds;
-    if (videoSeconds <= 0) {
+    if (!CMTIME_IS_NUMERIC(pts)) {
         return;
     }
 
-    double instantaneous = videoSeconds - micSeconds;
-    if (!self.micOffsetPrimed) {
-        self.micOffsetSeconds = instantaneous;
-        self.micOffsetPrimed = YES;
-    } else {
-        // Heavily smoothed: a per-buffer correction would chase jitter and
-        // audibly warble. This tracks drift, not latency.
-        self.micOffsetSeconds = self.micOffsetSeconds * 0.999 + instantaneous * 0.001;
+    // Both clocks are usually the host clock already, in which case this is
+    // the identity; it matters for capture devices that run their own.
+    CMClockRef micClock = self.micSession.synchronizationClock;
+    CMTime adjusted =
+        micClock ? CMSyncConvertTime(pts, micClock, CMClockGetHostTimeClock()) : pts;
+    if (!CMTIME_IS_NUMERIC(adjusted)) {
+        return;
     }
-
-    CMTime adjusted = CMTimeAdd(pts, CMTimeMakeWithSeconds(self.micOffsetSeconds, pts.timescale));
     if (CMTIME_COMPARE_INLINE(adjusted, <, self.firstPTS)) {
         return;
     }
@@ -568,6 +561,74 @@ char *tas_video_probe(const char *path, char **err_out) {
             stringWithFormat:@"%.0f\t%.0f\t%.0f\t%.3f\t%d\t%lu", fabs(size.width), fabs(size.height),
                              duration_ms, fps, audioTracks.count > 0 ? 1 : 0,
                              (unsigned long)audioTracks.count]);
+    }
+}
+
+// Debug aid for audio drift: one row per audio track, tab-separated as
+// "index\tfirst_pts_ms\tlast_pts_ms\tsamples", rows separated by newlines.
+//
+// Two tracks recorded from one clock should start and end within a few
+// milliseconds of each other; a growing gap between their last PTS is exactly
+// what unresampled microphone drift looks like, and it is invisible in a
+// waveform until the clip is minutes long.
+char *tas_video_track_offsets(const char *path, char **err_out) {
+    if (err_out) {
+        *err_out = NULL;
+    }
+    @autoreleasepool {
+        NSURL *url = [NSURL fileURLWithPath:[NSString stringWithUTF8String:path]];
+        AVURLAsset *asset = [AVURLAsset URLAssetWithURL:url options:nil];
+        NSArray<AVAssetTrack *> *tracks = [asset tracksWithMediaType:AVMediaTypeAudio];
+        if (tracks.count == 0) {
+            return tas_rec_copy_cstr(@"");
+        }
+
+        NSMutableArray<NSString *> *rows = [NSMutableArray array];
+        for (NSUInteger i = 0; i < tracks.count; i++) {
+            AVAssetTrack *track = tracks[i];
+            NSError *error = nil;
+            AVAssetReader *reader = [[AVAssetReader alloc] initWithAsset:asset error:&error];
+            if (!reader) {
+                tas_set_err(err_out, error ? error.localizedDescription
+                                           : @"couldn't read this movie's audio");
+                return NULL;
+            }
+            // No output settings: samples come back compressed, which is all
+            // this needs -- only their timestamps are read, never the audio.
+            AVAssetReaderTrackOutput *out =
+                [AVAssetReaderTrackOutput assetReaderTrackOutputWithTrack:track outputSettings:nil];
+            if (![reader canAddOutput:out]) {
+                tas_set_err(err_out, @"couldn't read this movie's audio");
+                return NULL;
+            }
+            [reader addOutput:out];
+            [reader startReading];
+
+            double first_ms = -1.0;
+            double last_ms = -1.0;
+            unsigned long long samples = 0;
+            CMSampleBufferRef buffer = NULL;
+            while ((buffer = [out copyNextSampleBuffer])) {
+                CMTime pts = CMSampleBufferGetPresentationTimeStamp(buffer);
+                if (CMTIME_IS_NUMERIC(pts)) {
+                    double ms = CMTimeGetSeconds(pts) * 1000.0;
+                    if (first_ms < 0.0) {
+                        first_ms = ms;
+                    }
+                    // The last sample's *end*, so a track whose final buffer
+                    // holds 1024 frames is not reported as ending 21ms early.
+                    CMTime dur = CMSampleBufferGetDuration(buffer);
+                    last_ms = CMTIME_IS_NUMERIC(dur) ? ms + CMTimeGetSeconds(dur) * 1000.0 : ms;
+                }
+                samples += (unsigned long long)CMSampleBufferGetNumSamples(buffer);
+                CFRelease(buffer);
+            }
+            [reader cancelReading];
+
+            [rows addObject:[NSString stringWithFormat:@"%lu\t%.3f\t%.3f\t%llu", (unsigned long)i,
+                                                       first_ms, last_ms, samples]];
+        }
+        return tas_rec_copy_cstr([rows componentsJoinedByString:@"\n"]);
     }
 }
 

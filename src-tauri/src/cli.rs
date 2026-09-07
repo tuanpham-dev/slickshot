@@ -64,7 +64,14 @@ pub enum CliCommand {
     },
     /// Print a recording's dimensions, duration, frame rate and whether it
     /// has audio.
-    Probe { path: PathBuf },
+    Probe {
+        path: PathBuf,
+        /// Also print each audio track's first and last sample time. Two
+        /// tracks whose last timestamps drift apart mean the microphone is
+        /// not being held to the screen stream's clock.
+        #[arg(long)]
+        track_offsets: bool,
+    },
     /// Re-shoot the last confirmed region without showing the overlay.
     /// Needs the app running -- the region is remembered by it.
     RepeatRegion {
@@ -321,15 +328,36 @@ pub fn run_headless(cmd: CliCommand) -> Result<(), String> {
             println!("{}", result.url);
             Ok(())
         }
-        CliCommand::Probe { path } => {
-            let info = crate::record::default_backend()
-                .probe(&path)
-                .map_err(|e| e.to_string())?;
+        CliCommand::Probe {
+            path,
+            track_offsets,
+        } => {
+            let backend = crate::record::default_backend();
+            let info = backend.probe(&path).map_err(|e| e.to_string())?;
             println!("width: {}", info.width);
             println!("height: {}", info.height);
             println!("duration_ms: {}", info.duration_ms);
             println!("fps: {:.3}", info.fps);
             println!("audio: {}", if info.has_audio { "yes" } else { "none" });
+            println!("audio_tracks: {}", info.audio_tracks);
+            if track_offsets {
+                let tracks = backend.track_offsets(&path).map_err(|e| e.to_string())?;
+                for t in &tracks {
+                    println!(
+                        "track {}: first={:.3}ms last={:.3}ms samples={}",
+                        t.index, t.first_pts_ms, t.last_pts_ms, t.samples
+                    );
+                }
+                // The number that actually answers "did the mic drift?" --
+                // printed rather than left for the reader to subtract.
+                if let (Some(a), Some(b)) = (tracks.first(), tracks.get(1)) {
+                    println!(
+                        "skew: start={:.3}ms end={:.3}ms",
+                        b.first_pts_ms - a.first_pts_ms,
+                        b.last_pts_ms - a.last_pts_ms
+                    );
+                }
+            }
             Ok(())
         }
         CliCommand::ListMonitors => {
@@ -501,12 +529,12 @@ pub fn dispatch(app: AppHandle, cmd: CliCommand) {
             // Consumed by `record_start` for exactly the capture this
             // triggers, so a scripted run cannot leak its audio choice into
             // whatever the user records by hand afterwards.
-            let has = |name: &str| audio.iter().any(|a| a.eq_ignore_ascii_case(name));
+            let (system_audio, microphone) = parse_audio_sources(&audio);
             *app.state::<crate::recording::RecordCliOptions>().0.lock().unwrap() =
                 Some(crate::recording::CliRecordOptions {
                     duration_s: duration,
-                    system_audio: audio.is_empty().then_some(false).or(Some(has("system"))),
-                    microphone: audio.is_empty().then_some(false).or(Some(has("mic"))),
+                    system_audio,
+                    microphone,
                     fps,
                 });
             spawn_capture(app, CaptureMode::Record, capture)
@@ -520,6 +548,24 @@ pub fn dispatch(app: AppHandle, cmd: CliCommand) {
         }
         _ => eprintln!("[cli] this command should have run headlessly and never reached the app"),
     }
+}
+
+/// Turns `--audio system,mic` into the two overrides `record_start` takes.
+///
+/// `None` means "the user did not say", which is the whole point: an omitted
+/// flag has to leave the saved setting and the overlay's own toggles alone
+/// rather than silently forcing both sources off.
+fn parse_audio_sources(audio: &[String]) -> (Option<bool>, Option<bool>) {
+    if audio.is_empty() {
+        return (None, None);
+    }
+    let has = |name: &str| {
+        audio
+            .iter()
+            .flat_map(|a| a.split(','))
+            .any(|a| a.trim().eq_ignore_ascii_case(name))
+    };
+    (Some(has("system")), Some(has("mic")))
 }
 
 fn spawn_open(app: AppHandle, path: PathBuf) {
@@ -578,4 +624,52 @@ pub fn export_to_sink(app: &AppHandle, img: RgbaImage, output: &OutputArgs, sett
     crate::export::notify_saved(app, &path.to_string_lossy());
     crate::history::record_saved_file(app, &img, &path.to_string_lossy());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn v(items: &[&str]) -> Vec<String> {
+        items.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn no_audio_flag_overrides_nothing() {
+        // The regression this guards: returning Some(false) here silently
+        // disabled audio the user had switched on in Settings or the overlay.
+        assert_eq!(parse_audio_sources(&[]), (None, None));
+    }
+
+    #[test]
+    fn naming_a_source_enables_only_it() {
+        assert_eq!(parse_audio_sources(&v(&["system"])), (Some(true), Some(false)));
+        assert_eq!(parse_audio_sources(&v(&["mic"])), (Some(false), Some(true)));
+    }
+
+    #[test]
+    fn both_sources_can_be_asked_for() {
+        assert_eq!(
+            parse_audio_sources(&v(&["system", "mic"])),
+            (Some(true), Some(true))
+        );
+        // Also when it arrives as one unsplit value.
+        assert_eq!(
+            parse_audio_sources(&v(&["system,mic"])),
+            (Some(true), Some(true))
+        );
+    }
+
+    #[test]
+    fn source_names_ignore_case_and_padding() {
+        assert_eq!(
+            parse_audio_sources(&v(&[" System , MIC "])),
+            (Some(true), Some(true))
+        );
+    }
+
+    #[test]
+    fn an_unknown_source_turns_both_off_rather_than_guessing() {
+        assert_eq!(parse_audio_sources(&v(&["speaker"])), (Some(false), Some(false)));
+    }
 }

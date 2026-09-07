@@ -52,6 +52,22 @@ pub struct VideoInfo {
     pub duration_ms: u64,
     pub fps: f32,
     pub has_audio: bool,
+    /// How many separate audio tracks the file holds: 1 for system audio or
+    /// microphone alone, 2 when both were recorded. Kept distinct from
+    /// `has_audio` so a silent-microphone bug is visible as a missing track
+    /// rather than hiding behind "yes, there is sound".
+    #[serde(default)]
+    pub audio_tracks: u32,
+}
+
+/// Where one audio track starts and ends, for diagnosing drift between two
+/// tracks recorded from different clocks.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct TrackOffsets {
+    pub index: u32,
+    pub first_pts_ms: f64,
+    pub last_pts_ms: f64,
+    pub samples: u64,
 }
 
 /// A half-open span of a clip, in milliseconds from its start.
@@ -140,6 +156,15 @@ pub trait VideoBackend: Send + Sync {
     ) -> RecordResult<()>;
     /// Writes a poster frame from mid-clip as a PNG, for history cards.
     fn poster(&self, src: &Path, dst: &Path) -> RecordResult<()>;
+
+    /// Per-audio-track timing, for `slickshot probe --track-offsets`. A
+    /// diagnostic rather than something the app depends on, so a backend that
+    /// has not implemented it stays usable.
+    fn track_offsets(&self, _path: &Path) -> RecordResult<Vec<TrackOffsets>> {
+        Err(RecordError::Unsupported(
+            "track offsets aren't available on this platform".into(),
+        ))
+    }
 }
 
 pub fn default_backend() -> Box<dyn VideoBackend> {
