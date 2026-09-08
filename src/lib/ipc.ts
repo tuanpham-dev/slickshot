@@ -558,11 +558,67 @@ export interface VideoInfo {
   duration_ms: number;
   fps: number;
   has_audio: boolean;
+  /** 1 for a single source, 2 when system audio and the mic were both on. */
+  audio_tracks: number;
 }
 
 export const videoProbe = (id: string) => call<VideoInfo>("video_probe", { id });
 export const videoDiscard = (id: string) => call<void>("video_discard", { id });
 export const videoReveal = (id: string) => call<void>("video_reveal", { id });
+
+export interface TimeRange {
+  start_ms: number;
+  end_ms: number;
+}
+
+export type CensorMode =
+  | { kind: "solid"; r: number; g: number; b: number }
+  | { kind: "pixelate"; block: number }
+  | { kind: "blur"; sigma: number };
+
+export type Censor = { rect: PhysRect } & CensorMode;
+
+export type VideoDest = { kind: "path"; path: string } | { kind: "quicksave" };
+
+export interface VideoExportRequest {
+  id: string;
+  range: TimeRange;
+  /** Playback multiplier: 2.0 makes the output half as long. */
+  speed: number;
+  crop?: PhysRect | null;
+  output_size: [number, number];
+  format: "mp4" | "gif";
+  dest: VideoDest;
+  censors?: Censor[];
+  keep_audio?: boolean;
+  /** GIF only; MP4 keeps the source's own frame timing. */
+  gif_fps?: number | null;
+}
+
+export interface VideoExportResult {
+  saved_path: string;
+}
+
+export const videoExportPrepare = (request: VideoExportRequest) =>
+  call<void>("video_export_prepare", { request });
+
+/** Runs the prepared export. The body is the annotation overlay as a PNG,
+ * already sized to the output; pass an empty array when there is none.
+ * Split in two the same way `exportPrepare`/`exportCommit` is, because a
+ * command takes either a JSON body or a raw one, never both. */
+export async function videoExport(overlayPng: Uint8Array): Promise<VideoExportResult> {
+  try {
+    return await invoke<VideoExportResult>("video_export", overlayPng);
+  } catch (err) {
+    throw new IpcError(err);
+  }
+}
+
+export function onVideoExportProgress(
+  cb: (p: { done: number; total: number }) => void,
+): Promise<UnlistenFn> {
+  return listen<{ done: number; total: number }>("video:export-progress", (e) => cb(e.payload));
+}
 
 /** A recording's streaming URL. Its own protocol rather than `slickshot://`
  * because a <video> needs byte-range requests to seek. */

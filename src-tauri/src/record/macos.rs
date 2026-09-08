@@ -824,6 +824,153 @@ mod live_tests {
         let _ = std::fs::remove_file(&dst);
     }
 
+    /// Live: the editor's whole export pipeline -- crop, resize, censor and a
+    /// burnt-in overlay -- into both output formats.
+    #[test]
+    #[ignore]
+    fn exports_a_processed_clip_as_mp4_and_gif() {
+        use crate::record::transform::{self, Censor, CensorMode};
+
+        let (rect, monitor_id) = live_test_region();
+        let src_path = temp_path("slickshot-live-export-src.mp4");
+        let mp4 = temp_path("slickshot-live-export.mp4");
+        let gif = temp_path("slickshot-live-export.gif");
+        let backend = MacBackend;
+
+        let recording = backend
+            .start_recording(&RecordConfig {
+                rect,
+                monitor_id,
+                fps: 30,
+                show_cursor: true,
+                system_audio: false,
+                microphone: false,
+                out_path: src_path,
+            })
+            .expect("start");
+        std::thread::sleep(Duration::from_secs(3));
+        let src = recording.stop().expect("stop");
+        let before = backend.probe(&src).expect("probe");
+
+        // Crop the top-left quarter, scale it to a fixed 320x240, black out a
+        // corner, and stamp one opaque pixel over the censor.
+        let crop = PhysRect::new(0, 0, before.width / 2, before.height / 2);
+        let out_size = (320u32, 240u32);
+        let censors = vec![Censor {
+            rect: PhysRect::new(0, 0, 100, 100),
+            mode: CensorMode::Solid { r: 0, g: 0, b: 0 },
+        }];
+        let mut overlay = RgbaImage::from_pixel(out_size.0, out_size.1, image::Rgba([0, 0, 0, 0]));
+        overlay.put_pixel(50, 50, image::Rgba([255, 0, 0, 255]));
+
+        let process = |frame: &mut RgbaImage| {
+            *frame = transform::crop(frame, crop);
+            *frame = transform::resize(frame, out_size.0, out_size.1);
+            transform::apply_censors(frame, &censors);
+            transform::composite_overlay(frame, &overlay);
+        };
+
+        let range = TimeRange {
+            start_ms: 500,
+            end_ms: 2_000,
+        };
+        let opts = TranscodeOptions {
+            range,
+            speed: 1.0,
+            crop: Some(crop),
+            output: out_size,
+            keep_audio: false,
+        };
+        let mut out_pts: Vec<u64> = Vec::new();
+        backend
+            .transcode(&src, &mp4, &opts, &mut |mut frame| {
+                process(&mut frame.image);
+                out_pts.push(frame.pts_ms);
+                Some(frame)
+            })
+            .expect("transcode");
+        println!(
+            "transcode pts: n={} first={:?} last={:?}",
+            out_pts.len(),
+            out_pts.first(),
+            out_pts.last()
+        );
+
+        let after = backend.probe(&mp4).expect("probe mp4");
+        println!(
+            "mp4: {}x{} {}ms",
+            after.width, after.height, after.duration_ms
+        );
+        assert_eq!((after.width, after.height), out_size);
+        assert!(
+            (1_400..=1_600).contains(&after.duration_ms),
+            "expected about 1500ms, got {}ms",
+            after.duration_ms
+        );
+
+        // The processing really reached the pixels: decode the export back and
+        // look for the overlay dot sitting on top of the censored corner.
+        let mut checked = false;
+        backend
+            .decode_frames(
+                &mp4,
+                TimeRange {
+                    start_ms: 0,
+                    end_ms: 1_000,
+                },
+                2,
+                &mut |frame| {
+                    if !checked {
+                        checked = true;
+                        let dot = frame.image.get_pixel(50, 50).0;
+                        let censored = frame.image.get_pixel(20, 20).0;
+                        println!("overlay pixel {dot:?}, censored pixel {censored:?}");
+                        // H.264 is lossy, so this asks for "clearly red" and
+                        // "clearly dark" rather than exact values.
+                        assert!(
+                            dot[0] > 150 && dot[1] < 110 && dot[2] < 110,
+                            "the burnt-in overlay should still be red, got {dot:?}"
+                        );
+                        assert!(
+                            censored.iter().take(3).all(|c| *c < 60),
+                            "the censored corner should still be dark, got {censored:?}"
+                        );
+                    }
+                    true
+                },
+            )
+            .expect("decode the export");
+        assert!(checked, "the export had no frames to check");
+
+        // And the same pipeline into a GIF at 10fps.
+        let mut frames = Vec::new();
+        backend
+            .decode_frames(&src, range, 10, &mut |mut frame| {
+                process(&mut frame.image);
+                frames.push(frame.image);
+                true
+            })
+            .expect("decode for gif");
+        println!("gif frames: {}", frames.len());
+        assert!(
+            (13..=17).contains(&frames.len()),
+            "expected about 15 frames over 1.5s at 10fps, got {}",
+            frames.len()
+        );
+        let file = std::fs::File::create(&gif).expect("create gif");
+        crate::record::gif::encode(frames, 10, std::io::BufWriter::new(file)).expect("encode gif");
+
+        let written = std::fs::metadata(&gif).expect("gif metadata").len();
+        println!("gif bytes: {written}");
+        assert!(written > 1_000, "the GIF looks empty at {written} bytes");
+        let header = std::fs::read(&gif).expect("read gif");
+        assert_eq!(&header[..6], b"GIF89a", "that is not a GIF");
+
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&mp4);
+        let _ = std::fs::remove_file(&gif);
+    }
+
     /// Live: records with both audio sources and checks the file really has
     /// two separate tracks.
     ///

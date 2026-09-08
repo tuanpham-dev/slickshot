@@ -12,6 +12,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use http_range::HttpRange;
+use image::RgbaImage;
+use serde::{Deserialize, Serialize};
 use tauri::http::{Request, Response, StatusCode};
 use tauri::{
     AppHandle, Builder, Emitter, Manager, Runtime, UriSchemeContext, WebviewUrl,
@@ -19,7 +21,9 @@ use tauri::{
 };
 
 use crate::commands::{CommandError, CommandResult};
-use crate::record::VideoInfo;
+use crate::geometry::PhysRect;
+use crate::record::transform::{self, Censor};
+use crate::record::{TimeRange, TranscodeOptions, VideoInfo};
 
 const LABEL: &str = "video-editor";
 /// Chunk ceiling for a ranged response. A `<video>` asking for "the rest of
@@ -85,6 +89,26 @@ fn not_found_generic() -> Response<Vec<u8>> {
         .unwrap()
 }
 
+/// The inclusive byte span a `Range` header asks for, clamped to the file and
+/// to `MAX_CHUNK`. `None` means the header was unsatisfiable.
+///
+/// Separated out because this is the part that is easy to get subtly wrong --
+/// `Content-Range` is inclusive at both ends, so an off-by-one here makes a
+/// `<video>` stall at a seek rather than fail outright.
+fn resolve_range(header: &str, len: u64) -> Option<(u64, u64)> {
+    if len == 0 {
+        return None;
+    }
+    let ranges = HttpRange::parse(header, len).ok()?;
+    let first = ranges.first()?;
+    let start = first.start;
+    if start >= len {
+        return None;
+    }
+    let end = (start + first.length.min(MAX_CHUNK)).min(len).saturating_sub(1);
+    Some((start, end))
+}
+
 fn serve<R: Runtime>(
     app: &tauri::AppHandle<R>,
     id: &str,
@@ -109,7 +133,7 @@ fn serve<R: Runtime>(
             .unwrap();
     };
 
-    let Ok(ranges) = HttpRange::parse(range, len) else {
+    let Some((start, end)) = resolve_range(range, len) else {
         return Response::builder()
             .status(StatusCode::RANGE_NOT_SATISFIABLE)
             .header("Content-Range", format!("bytes */{len}"))
@@ -117,12 +141,6 @@ fn serve<R: Runtime>(
             .body(Vec::new())
             .unwrap();
     };
-    let Some(first) = ranges.first() else {
-        return not_found_generic();
-    };
-
-    let start = first.start;
-    let end = (start + first.length.min(MAX_CHUNK)).min(len).saturating_sub(1);
     let slice = bytes[start as usize..=(end as usize).min(bytes.len() - 1)].to_vec();
 
     Response::builder()
@@ -165,6 +183,257 @@ pub async fn open_editor(app: &AppHandle, path: &Path) -> CommandResult<()> {
     let _ = window.show();
     let _ = window.set_focus();
     Ok(())
+}
+
+// -- Export -----------------------------------------------------------------
+//
+// Shaped like the image editor's `export_prepare`/`export_commit` pair, and
+// for the same reason: the annotation overlay is a PNG that has to cross IPC
+// as raw bytes, and a Tauri command takes either a JSON body or a raw one,
+// never both. So the description of the export goes over first as JSON, and
+// the second call carries only the overlay's bytes (empty when there is none).
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoFormat {
+    Mp4,
+    Gif,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum VideoDest {
+    /// An explicit path the user picked in a save dialog.
+    Path { path: String },
+    /// The configured save folder, named like a screenshot quicksave.
+    Quicksave,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VideoExportRequest {
+    pub id: String,
+    pub range: TimeRange,
+    /// Playback multiplier: 2.0 makes the output half as long.
+    pub speed: f32,
+    /// Region of the source frame to keep, before resizing.
+    #[serde(default)]
+    pub crop: Option<PhysRect>,
+    pub output_size: (u32, u32),
+    pub format: VideoFormat,
+    pub dest: VideoDest,
+    #[serde(default)]
+    pub censors: Vec<Censor>,
+    #[serde(default)]
+    pub keep_audio: bool,
+    /// Frames per second for a GIF; ignored for MP4, which keeps the source's
+    /// own frame timing.
+    #[serde(default)]
+    pub gif_fps: Option<u32>,
+}
+
+#[derive(Default)]
+pub struct PendingVideoExport(pub Mutex<Option<VideoExportRequest>>);
+
+#[derive(Debug, Clone, Serialize)]
+pub struct VideoExportResult {
+    pub saved_path: String,
+}
+
+#[derive(Clone, Serialize)]
+struct ExportProgress {
+    done: u64,
+    total: u64,
+}
+
+#[tauri::command]
+pub fn video_export_prepare(
+    state: tauri::State<PendingVideoExport>,
+    request: VideoExportRequest,
+) -> CommandResult<()> {
+    *state.0.lock().unwrap() = Some(request);
+    Ok(())
+}
+
+/// Runs the prepared export. The raw body is the annotation overlay as a PNG,
+/// already sized to the *output*; an empty body means there is nothing to
+/// burn in.
+#[tauri::command]
+pub async fn video_export(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> CommandResult<VideoExportResult> {
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err(CommandError::Image(
+                "video_export expects a raw binary body, not JSON".into(),
+            ))
+        }
+    };
+
+    let req = app
+        .state::<PendingVideoExport>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| CommandError::Image("no export was prepared".into()))?;
+
+    let src = app
+        .state::<VideoStore>()
+        .get(&req.id)
+        .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
+
+    let overlay = if bytes.is_empty() {
+        None
+    } else {
+        Some(
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+                .map_err(|e| CommandError::Image(e.to_string()))?
+                .to_rgba8(),
+        )
+    };
+
+    let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+    let dest = match &req.dest {
+        VideoDest::Path { path } => PathBuf::from(path),
+        VideoDest::Quicksave => crate::export::recording_quicksave_file(&settings)
+            .with_extension(match req.format {
+                VideoFormat::Mp4 => "mp4",
+                VideoFormat::Gif => "gif",
+            }),
+    };
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| CommandError::Image(e.to_string()))?;
+    }
+
+    // Encoding is CPU-bound and long enough to matter, so it runs off the
+    // async runtime rather than stalling every other command behind it.
+    let worker_app = app.clone();
+    let worker_dest = dest.clone();
+    let saved = tauri::async_runtime::spawn_blocking(move || {
+        run_export(&worker_app, &src, &worker_dest, &req, overlay.as_ref())
+    })
+    .await
+    .map_err(|e| CommandError::Image(e.to_string()))??;
+
+    crate::export::notify_saved(&app, &saved.to_string_lossy());
+    crate::history::record_saved_video(&app, &saved);
+    Ok(VideoExportResult {
+        saved_path: saved.to_string_lossy().into_owned(),
+    })
+}
+
+/// The actual pixel work, shared by both output formats: crop, resize, censor,
+/// then the annotation overlay last so nothing is drawn over it.
+fn process_frame(
+    frame: &mut RgbaImage,
+    req: &VideoExportRequest,
+    overlay: Option<&RgbaImage>,
+) {
+    if let Some(crop) = req.crop {
+        *frame = transform::crop(frame, crop);
+    }
+    let (w, h) = req.output_size;
+    if frame.dimensions() != (w, h) {
+        *frame = transform::resize(frame, w, h);
+    }
+    if !req.censors.is_empty() {
+        transform::apply_censors(frame, &req.censors);
+    }
+    if let Some(overlay) = overlay {
+        transform::composite_overlay(frame, overlay);
+    }
+}
+
+fn run_export(
+    app: &AppHandle,
+    src: &Path,
+    dest: &Path,
+    req: &VideoExportRequest,
+    overlay: Option<&RgbaImage>,
+) -> CommandResult<PathBuf> {
+    let backend = crate::record::default_backend();
+    let total_ms = req.range.duration_ms().max(1);
+
+    match req.format {
+        VideoFormat::Mp4 => {
+            let opts = TranscodeOptions {
+                range: req.range,
+                speed: req.speed,
+                crop: req.crop,
+                output: req.output_size,
+                keep_audio: req.keep_audio,
+            };
+            // The shim's audio path already time-stretches by `speed`; the
+            // video side is this callback rewriting each frame's timestamp,
+            // so the two land on the same duration.
+            let speed = req.speed.max(0.01) as f64;
+            let mut last_report = 0u64;
+            backend
+                .transcode(src, dest, &opts, &mut |mut frame| {
+                    process_frame(&mut frame.image, req, overlay);
+                    let elapsed = frame.pts_ms;
+                    frame.pts_ms = (frame.pts_ms as f64 / speed) as u64;
+                    // Throttled: a 30fps export would otherwise emit an event
+                    // per frame and drown the webview in IPC.
+                    if elapsed.saturating_sub(last_report) >= 250 {
+                        last_report = elapsed;
+                        let _ = app.emit(
+                            "video:export-progress",
+                            ExportProgress {
+                                done: elapsed.min(total_ms),
+                                total: total_ms,
+                            },
+                        );
+                    }
+                    Some(frame)
+                })
+                .map_err(|e| CommandError::Image(e.to_string()))?;
+        }
+        VideoFormat::Gif => {
+            let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+            let fps = req.gif_fps.unwrap_or(settings.gif_fps).clamp(1, 50);
+            // Decoding at the *output* rate already applies the speed change:
+            // asking for `fps * speed` source frames per second and then
+            // playing them back at `fps` is what makes the clip faster.
+            let src_fps = ((fps as f32 * req.speed).round() as u32).clamp(1, 120);
+
+            let mut frames: Vec<RgbaImage> = Vec::new();
+            let mut last_report = 0u64;
+            backend
+                .decode_frames(src, req.range, src_fps, &mut |mut frame| {
+                    process_frame(&mut frame.image, req, overlay);
+                    frames.push(frame.image);
+                    let elapsed = frame.pts_ms.saturating_sub(req.range.start_ms);
+                    if elapsed.saturating_sub(last_report) >= 250 {
+                        last_report = elapsed;
+                        let _ = app.emit(
+                            "video:export-progress",
+                            ExportProgress {
+                                done: elapsed.min(total_ms),
+                                total: total_ms,
+                            },
+                        );
+                    }
+                    true
+                })
+                .map_err(|e| CommandError::Image(e.to_string()))?;
+
+            let file = std::fs::File::create(dest).map_err(|e| CommandError::Image(e.to_string()))?;
+            crate::record::gif::encode(frames, fps, std::io::BufWriter::new(file))
+                .map_err(|e| CommandError::Image(e.to_string()))?;
+        }
+    }
+
+    let _ = app.emit(
+        "video:export-progress",
+        ExportProgress {
+            done: total_ms,
+            total: total_ms,
+        },
+    );
+    Ok(dest.to_path_buf())
 }
 
 /// Reports a recording's dimensions, duration and whether it has sound.
@@ -228,5 +497,148 @@ mod tests {
     fn unknown_ids_are_not_served() {
         let store = VideoStore::default();
         assert!(store.get("nope").is_none());
+    }
+
+    #[test]
+    fn a_leading_range_is_inclusive_at_both_ends() {
+        // `curl -r 0-99` must answer `Content-Range: bytes 0-99/<len>`: 100
+        // bytes, not 99 and not 101.
+        let (start, end) = resolve_range("bytes=0-99", 5_000).expect("satisfiable");
+        assert_eq!((start, end), (0, 99));
+        assert_eq!(end - start + 1, 100, "exactly the hundred bytes asked for");
+    }
+
+    #[test]
+    fn an_open_ended_range_is_capped_to_one_chunk() {
+        // What a <video> actually sends: "the rest of the file". Answering it
+        // in full would pull a whole recording into memory per seek.
+        let len = MAX_CHUNK * 3;
+        let (start, end) = resolve_range("bytes=0-", len).expect("satisfiable");
+        assert_eq!(start, 0);
+        assert_eq!(end, MAX_CHUNK - 1, "capped at the chunk ceiling");
+    }
+
+    #[test]
+    fn a_range_near_the_end_stops_at_the_last_byte() {
+        let (start, end) = resolve_range("bytes=990-", 1_000).expect("satisfiable");
+        assert_eq!((start, end), (990, 999), "never past the final byte");
+    }
+
+    #[test]
+    fn a_suffix_range_counts_back_from_the_end() {
+        let (start, end) = resolve_range("bytes=-100", 1_000).expect("satisfiable");
+        assert_eq!((start, end), (900, 999));
+    }
+
+    #[test]
+    fn an_unsatisfiable_range_is_rejected() {
+        assert!(resolve_range("bytes=5000-6000", 1_000).is_none(), "past the end");
+        assert!(resolve_range("nonsense", 1_000).is_none());
+        assert!(resolve_range("bytes=0-10", 0).is_none(), "an empty file");
+    }
+
+    fn request(output: (u32, u32)) -> VideoExportRequest {
+        VideoExportRequest {
+            id: "x".into(),
+            range: TimeRange {
+                start_ms: 0,
+                end_ms: 1_000,
+            },
+            speed: 1.0,
+            crop: None,
+            output_size: output,
+            format: VideoFormat::Mp4,
+            dest: VideoDest::Quicksave,
+            censors: Vec::new(),
+            keep_audio: false,
+            gif_fps: None,
+        }
+    }
+
+    #[test]
+    fn a_frame_is_cropped_then_resized_to_the_output() {
+        let mut frame = RgbaImage::from_pixel(100, 80, image::Rgba([10, 20, 30, 255]));
+        let mut req = request((20, 20));
+        req.crop = Some(PhysRect::new(10, 10, 40, 40));
+        process_frame(&mut frame, &req, None);
+        assert_eq!(frame.dimensions(), (20, 20), "the output size wins");
+    }
+
+    #[test]
+    fn a_frame_with_no_crop_is_still_resized() {
+        let mut frame = RgbaImage::from_pixel(64, 64, image::Rgba([1, 2, 3, 255]));
+        process_frame(&mut frame, &request((32, 16)), None);
+        assert_eq!(frame.dimensions(), (32, 16));
+    }
+
+    #[test]
+    fn the_overlay_goes_on_last_so_censors_cannot_cover_it() {
+        // A censor over the whole frame, and an opaque overlay pixel on top:
+        // if the order were reversed the overlay would be blacked out.
+        let mut frame = RgbaImage::from_pixel(8, 8, image::Rgba([200, 200, 200, 255]));
+        let mut req = request((8, 8));
+        req.censors = vec![Censor {
+            rect: PhysRect::new(0, 0, 8, 8),
+            mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
+        }];
+        let mut overlay = RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 0]));
+        overlay.put_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+
+        process_frame(&mut frame, &req, Some(&overlay));
+        assert_eq!(
+            frame.get_pixel(2, 2).0,
+            [255, 0, 0, 255],
+            "the annotation survives the censor beneath it"
+        );
+        assert_eq!(
+            frame.get_pixel(5, 5).0,
+            [0, 0, 0, 255],
+            "and the censor still covers everywhere the overlay is clear"
+        );
+    }
+
+    #[test]
+    fn censors_are_measured_against_the_output_not_the_source() {
+        // The crop is 40x40 of a 100x80 frame, scaled to 20x20; a censor at
+        // (0,0,10,10) must cover the output's top-left quarter.
+        let mut frame = RgbaImage::from_pixel(100, 80, image::Rgba([255, 255, 255, 255]));
+        let mut req = request((20, 20));
+        req.crop = Some(PhysRect::new(10, 10, 40, 40));
+        req.censors = vec![Censor {
+            rect: PhysRect::new(0, 0, 10, 10),
+            mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
+        }];
+        process_frame(&mut frame, &req, None);
+        assert_eq!(frame.get_pixel(5, 5).0, [0, 0, 0, 255], "inside the censor");
+        assert_eq!(
+            frame.get_pixel(15, 15).0,
+            [255, 255, 255, 255],
+            "outside it"
+        );
+    }
+
+    #[test]
+    fn an_export_request_round_trips_through_json() {
+        // The frontend builds this by hand, so the tags have to match.
+        let json = r#"{
+            "id": "abc",
+            "range": { "start_ms": 100, "end_ms": 900 },
+            "speed": 2.0,
+            "output_size": [320, 240],
+            "format": "gif",
+            "dest": { "kind": "path", "path": "/tmp/a.gif" },
+            "censors": [{ "rect": {"x":1,"y":2,"w":3,"h":4}, "kind": "pixelate", "block": 8 }],
+            "keep_audio": true
+        }"#;
+        let req: VideoExportRequest = serde_json::from_str(json).expect("parse");
+        assert_eq!(req.format, VideoFormat::Gif);
+        assert_eq!(req.range.duration_ms(), 800);
+        assert_eq!(req.output_size, (320, 240));
+        assert_eq!(req.censors.len(), 1);
+        assert!(req.crop.is_none(), "an omitted crop is None, not an error");
+        match req.dest {
+            VideoDest::Path { ref path } => assert_eq!(path, "/tmp/a.gif"),
+            _ => panic!("expected a path destination"),
+        }
     }
 }

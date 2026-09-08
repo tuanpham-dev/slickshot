@@ -1097,6 +1097,13 @@ int tas_video_transcode(const char *src,
 
         __block bool failed = false;
         __block NSString *failure = nil;
+        // How long the export should last. A recording is variable-rate --
+        // ScreenCaptureKit emits a frame only when something changes -- so a
+        // trim whose final stretch is still has no source frame near its end,
+        // and the export would simply stop early: trimming 0.5s-2.0s of a
+        // static screen gave a 1.19s clip. `endSessionAtSourceTime` below
+        // fixes the end exactly, holding the last frame to fill the gap.
+        double expected_out = (clamped_end - clamped_start) / (speed > 0 ? speed : 1.0);
 
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
         dispatch_queue_t videoQueue =
@@ -1196,6 +1203,11 @@ int tas_video_transcode(const char *src,
             tas_set_err(err_out, failure ?: @"the export failed");
             return -1;
         }
+
+        // Fixes the end of the timeline, so the closing frame is held for
+        // exactly as long as the trim asked for instead of for whatever
+        // duration the writer would otherwise infer from the frame spacing.
+        [writer endSessionAtSourceTime:CMTimeMakeWithSeconds(expected_out, 600)];
 
         __block bool finished = false;
         dispatch_semaphore_t writerDone = dispatch_semaphore_create(0);

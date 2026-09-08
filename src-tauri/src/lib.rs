@@ -99,6 +99,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
         .manage(recording::RecordSession::default())
         .manage(recording::RecordCliOptions::default())
         .manage(video::VideoStore::default())
+        .manage(video::PendingVideoExport::default())
         .invoke_handler(tauri::generate_handler![
             commands::list_monitors,
             commands::list_windows,
@@ -135,6 +136,8 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             video::video_probe,
             video::video_discard,
             video::video_reveal,
+            video::video_export_prepare,
+            video::video_export,
             scroll::scroll_start,
             scroll::scroll_stop,
             scroll::scroll_cancel,
