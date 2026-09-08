@@ -1,6 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { FolderOpen, Trash2 } from "lucide-react";
-import { Button } from "../ui/Button";
 import { Segmented } from "../ui/Segmented";
 import { useToast } from "../ui/Toast";
 import {
@@ -13,6 +11,7 @@ import {
   type VideoInfo,
 } from "../lib/ipc";
 import { Timeline } from "./Timeline";
+import { VideoExportBar } from "./VideoExportBar";
 import { clampTrim, formatTimecode, outputDuration, type Trim } from "./trim";
 
 const SPEEDS = [
@@ -206,30 +205,25 @@ export function VideoEditor({ params }: VideoEditorProps) {
         onTogglePlay={togglePlay}
       />
 
-      <div className="flex items-center justify-between gap-3 px-3 h-12 border-t border-[var(--border)] bg-[var(--surface)]">
+      <div className="flex items-center gap-3 px-3 h-8 border-t border-[var(--border)] bg-[var(--surface)]">
         <span className="text-[11px] font-mono text-[var(--fg-muted)] tabular-nums">
           {info.width} × {info.height} · {formatTimecode(outMs)}
           {info.has_audio ? " · audio" : ""}
         </span>
-        <div className="flex items-center gap-2">
-          <Button
-            variant="secondary"
-            size="sm"
-            icon={<FolderOpen size={14} />}
-            onClick={handleReveal}
-          >
-            Show in folder
-          </Button>
-          <Button
-            variant="secondary"
-            size="sm"
-            icon={<Trash2 size={14} />}
-            onClick={handleDiscard}
-          >
-            Discard
-          </Button>
-        </div>
       </div>
+
+      <VideoExportBar
+        request={{
+          id: videoId,
+          range: { start_ms: Math.round(trim.start), end_ms: Math.round(trim.end) },
+          speed: Number(speed),
+          output_size: [info.width, info.height],
+          format: "mp4",
+          keep_audio: info.has_audio,
+        }}
+        onDiscard={handleDiscard}
+        onReveal={handleReveal}
+      />
     </div>
   );
 }

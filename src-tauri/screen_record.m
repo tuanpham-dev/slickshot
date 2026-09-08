@@ -1225,3 +1225,31 @@ int tas_video_transcode(const char *src,
         return 0;
     }
 }
+
+// Puts a file on the pasteboard as a file URL, which is what makes Finder
+// paste a copy of it and Mail attach it -- as opposed to writing the bytes,
+// which no application would know what to do with for a video.
+bool tas_clipboard_copy_file(const char *path, char **err_out) {
+    if (err_out) {
+        *err_out = NULL;
+    }
+    @autoreleasepool {
+        NSString *p = [NSString stringWithUTF8String:path];
+        if (!p) {
+            tas_set_err(err_out, @"that path isn't valid text");
+            return false;
+        }
+        NSURL *url = [NSURL fileURLWithPath:p];
+        if (!url) {
+            tas_set_err(err_out, @"that path isn't a file");
+            return false;
+        }
+        NSPasteboard *pb = [NSPasteboard generalPasteboard];
+        [pb clearContents];
+        if (![pb writeObjects:@[ url ]]) {
+            tas_set_err(err_out, @"the clipboard refused that file");
+            return false;
+        }
+        return true;
+    }
+}

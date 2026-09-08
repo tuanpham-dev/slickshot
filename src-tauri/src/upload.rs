@@ -34,13 +34,50 @@ fn http_client() -> Result<reqwest::blocking::Client, String> {
         .map_err(|e| format!("couldn't build HTTP client: {e}"))
 }
 
+/// What is being uploaded. Screenshots were the only case for a long time, so
+/// the filename and MIME were simply hardcoded; recordings need the same
+/// providers to accept an MP4, and a host that is told "image/png" for a video
+/// either rejects it or serves it back unplayable.
+pub(crate) struct UploadMedia {
+    pub bytes: Vec<u8>,
+    /// Offered to the host in the multipart part.
+    pub file_name: String,
+    pub mime: &'static str,
+    /// Used for object keys we generate ourselves (S3).
+    pub ext: &'static str,
+    /// Whether this is a video, which the image-only hosts refuse.
+    pub is_video: bool,
+}
+
+impl UploadMedia {
+    pub fn png(bytes: Vec<u8>) -> Self {
+        Self {
+            bytes,
+            file_name: "screenshot.png".into(),
+            mime: "image/png",
+            ext: "png",
+            is_video: false,
+        }
+    }
+
+    pub fn mp4(bytes: Vec<u8>, uploaded_at: &str) -> Self {
+        Self {
+            bytes,
+            file_name: format!("Recording {uploaded_at}.mp4"),
+            mime: "video/mp4",
+            ext: "mp4",
+            is_video: true,
+        }
+    }
+}
+
 /// Uploads to catbox.moe's anonymous file host -- no account, no expiry,
 /// response body is the plain-text URL on success.
-fn upload_catbox(png: Vec<u8>) -> Result<UploadResult, String> {
+fn upload_catbox(media: UploadMedia) -> Result<UploadResult, String> {
     let client = http_client()?;
-    let part = reqwest::blocking::multipart::Part::bytes(png)
-        .file_name("screenshot.png")
-        .mime_str("image/png")
+    let part = reqwest::blocking::multipart::Part::bytes(media.bytes)
+        .file_name(media.file_name)
+        .mime_str(media.mime)
         .map_err(|e| e.to_string())?;
     let form = reqwest::blocking::multipart::Form::new()
         .text("reqtype", "fileupload")
@@ -92,7 +129,10 @@ fn parse_imgur_response(body: &serde_json::Value) -> Result<(String, Option<Stri
 }
 
 /// Uploads to Imgur via its anonymous (Client-ID-only) API.
-fn upload_imgur(png: Vec<u8>, client_id: &str) -> Result<UploadResult, String> {
+fn upload_imgur(media: UploadMedia, client_id: &str) -> Result<UploadResult, String> {
+    if media.is_video {
+        return Err("Imgur doesn't accept video uploads -- switch to Catbox, S3 or Google Drive in Settings > Upload.".to_string());
+    }
     if client_id.trim().is_empty() {
         return Err(
             "Imgur is selected but no Client ID is set -- add one in Settings > Upload (create one free at api.imgur.com/oauth2/addclient)."
@@ -101,9 +141,9 @@ fn upload_imgur(png: Vec<u8>, client_id: &str) -> Result<UploadResult, String> {
     }
 
     let client = http_client()?;
-    let part = reqwest::blocking::multipart::Part::bytes(png)
-        .file_name("screenshot.png")
-        .mime_str("image/png")
+    let part = reqwest::blocking::multipart::Part::bytes(media.bytes)
+        .file_name(media.file_name)
+        .mime_str(media.mime)
         .map_err(|e| e.to_string())?;
     let form = reqwest::blocking::multipart::Form::new().part("image", part);
 
@@ -165,7 +205,10 @@ fn parse_imgbb_response(body: &serde_json::Value) -> Result<(String, Option<Stri
 
 /// Uploads to imgbb, which takes an API key as a query parameter and the
 /// image as base64 in a multipart field.
-fn upload_imgbb(png: Vec<u8>, api_key: &str) -> Result<UploadResult, String> {
+fn upload_imgbb(media: UploadMedia, api_key: &str) -> Result<UploadResult, String> {
+    if media.is_video {
+        return Err("imgbb doesn't accept video uploads -- switch to Catbox, S3 or Google Drive in Settings > Upload.".to_string());
+    }
     if api_key.trim().is_empty() {
         return Err(
             "imgbb is selected but no API key is set -- add one in Settings > Upload (get one free at api.imgbb.com)."
@@ -174,7 +217,7 @@ fn upload_imgbb(png: Vec<u8>, api_key: &str) -> Result<UploadResult, String> {
     }
 
     let client = http_client()?;
-    let encoded = base64_encode(&png);
+    let encoded = base64_encode(&media.bytes);
     let form = reqwest::blocking::multipart::Form::new().text("image", encoded);
 
     let resp = client
@@ -268,18 +311,18 @@ fn s3_bucket(settings: &crate::settings::Settings) -> Result<Box<s3::Bucket>, St
     })
 }
 
-/// Object key for a new upload: `{prefix}{timestamp}-{short-uuid}.png`, with
+/// Object key for a new upload: `{prefix}{timestamp}-{short-uuid}.{ext}`, with
 /// the timestamp making keys sort chronologically and the uuid suffix
 /// keeping two uploads in the same second from colliding.
-fn s3_object_key(prefix: &str, timestamp: &str) -> String {
+fn s3_object_key(prefix: &str, timestamp: &str, ext: &str) -> String {
     let prefix = prefix.trim().trim_start_matches('/');
     let short: String = uuid::Uuid::new_v4().to_string().chars().take(8).collect();
     let stamp = timestamp.replace(':', "-");
     if prefix.is_empty() {
-        format!("{stamp}-{short}.png")
+        format!("{stamp}-{short}.{ext}")
     } else {
         let prefix = prefix.trim_end_matches('/');
-        format!("{prefix}/{stamp}-{short}.png")
+        format!("{prefix}/{stamp}-{short}.{ext}")
     }
 }
 
@@ -305,15 +348,15 @@ fn s3_public_url(settings: &crate::settings::Settings, key: &str) -> String {
 }
 
 fn upload_s3(
-    png: Vec<u8>,
+    media: UploadMedia,
     settings: &crate::settings::Settings,
     timestamp: &str,
 ) -> Result<UploadResult, String> {
     let bucket = s3_bucket(settings)?;
-    let key = s3_object_key(&settings.s3_key_prefix, timestamp);
+    let key = s3_object_key(&settings.s3_key_prefix, timestamp, media.ext);
 
     let response = bucket
-        .put_object_with_content_type(&key, &png, "image/png")
+        .put_object_with_content_type(&key, &media.bytes, media.mime)
         .map_err(|e| format!("S3 upload failed: {e}"))?;
     if response.status_code() >= 300 {
         return Err(format!("S3 returned {}", response.status_code()));
@@ -333,15 +376,15 @@ fn upload_s3(
 /// headless `upload` CLI command can reuse it without an `AppHandle`.
 pub(crate) fn upload_core(
     settings: &crate::settings::Settings,
-    png: Vec<u8>,
+    media: UploadMedia,
     uploaded_at: &str,
 ) -> Result<UploadResult, String> {
     match settings.upload_provider {
-        UploadProvider::Catbox => upload_catbox(png),
-        UploadProvider::Imgur => upload_imgur(png, &settings.imgur_client_id),
-        UploadProvider::S3 => upload_s3(png, settings, uploaded_at),
-        UploadProvider::Imgbb => upload_imgbb(png, &settings.imgbb_api_key),
-        UploadProvider::Gdrive => crate::drive::upload(png, settings, uploaded_at),
+        UploadProvider::Catbox => upload_catbox(media),
+        UploadProvider::Imgur => upload_imgur(media, &settings.imgur_client_id),
+        UploadProvider::S3 => upload_s3(media, settings, uploaded_at),
+        UploadProvider::Imgbb => upload_imgbb(media, &settings.imgbb_api_key),
+        UploadProvider::Gdrive => crate::drive::upload(media, settings, uploaded_at),
     }
 }
 
@@ -515,17 +558,17 @@ pub fn upload_image(app: AppHandle, request: tauri::ipc::Request<'_>) -> Command
         }
     };
 
-    upload_and_record(&app, bytes)
+    upload_and_record(&app, UploadMedia::png(bytes))
 }
 
 /// Uploads `png` to the configured provider and appends the result to the
 /// history store. Shared by the editor's `upload_image` command and the
 /// post-capture thumbnail's Upload action, which has no canvas to flatten
 /// and hands over the stored capture's bytes directly.
-pub(crate) fn upload_and_record(app: &AppHandle, png: Vec<u8>) -> CommandResult<UploadResult> {
+pub(crate) fn upload_and_record(app: &AppHandle, media: UploadMedia) -> CommandResult<UploadResult> {
     let settings = get_settings(app.clone())?;
     let uploaded_at = filename_timestamp_rfc3339();
-    let result = upload_core(&settings, png, &uploaded_at).map_err(CommandError::Image)?;
+    let result = upload_core(&settings, media, &uploaded_at).map_err(CommandError::Image)?;
 
     history_append(
         app,
@@ -566,7 +609,7 @@ mod tests {
 
     #[test]
     fn imgur_missing_client_id_errors_without_network() {
-        let err = upload_imgur(vec![0u8; 4], "").unwrap_err();
+        let err = upload_imgur(UploadMedia::png(vec![0u8; 4]), "").unwrap_err();
         assert!(err.contains("Client ID"));
     }
 
@@ -609,8 +652,8 @@ mod tests {
 
     #[test]
     fn s3_key_includes_prefix_and_is_unique() {
-        let a = s3_object_key("screenshots/", "2026-08-25T10:00:00Z");
-        let b = s3_object_key("screenshots/", "2026-08-25T10:00:00Z");
+        let a = s3_object_key("screenshots/", "2026-08-25T10:00:00Z", "png");
+        let b = s3_object_key("screenshots/", "2026-08-25T10:00:00Z", "png");
         assert!(a.starts_with("screenshots/2026-08-25T10-00-00Z-"), "got {a}");
         assert!(a.ends_with(".png"));
         assert_ne!(a, b, "same-second uploads must not collide");
@@ -618,7 +661,7 @@ mod tests {
 
     #[test]
     fn s3_key_without_prefix_has_no_leading_slash() {
-        let key = s3_object_key("", "2026-08-25T10:00:00Z");
+        let key = s3_object_key("", "2026-08-25T10:00:00Z", "png");
         assert!(!key.starts_with('/'), "got {key}");
     }
 
@@ -674,7 +717,7 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .unwrap();
 
-        let result = upload_catbox(png).expect("catbox upload should succeed");
+        let result = upload_catbox(UploadMedia::png(png)).expect("catbox upload should succeed");
         println!("catbox url: {}", result.url);
         assert!(result.url.starts_with("https://"));
     }

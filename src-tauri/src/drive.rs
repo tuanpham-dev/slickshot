@@ -449,7 +449,7 @@ fn ensure_folder(client: &reqwest::blocking::Client, token: &str) -> Result<Stri
 /// Uploads `png` into the SlickShot folder and returns its shareable link.
 /// Called through `upload::upload_core` like every other provider.
 pub(crate) fn upload(
-    png: Vec<u8>,
+    media: crate::upload::UploadMedia,
     settings: &crate::settings::Settings,
     uploaded_at: &str,
 ) -> Result<crate::upload::UploadResult, String> {
@@ -468,7 +468,14 @@ pub(crate) fn upload(
     let folder = ensure_folder(&client, &token)?;
 
     let metadata = serde_json::json!({
-        "name": format!("Screenshot {uploaded_at}.png"),
+        // Drive shows this in the UI, so it keeps the timestamped form
+        // screenshots have always used rather than the generic multipart
+        // filename the other hosts get.
+        "name": format!(
+            "{} {uploaded_at}.{}",
+            if media.is_video { "Recording" } else { "Screenshot" },
+            media.ext
+        ),
         "parents": [folder],
     });
     let form = reqwest::blocking::multipart::Form::new()
@@ -480,8 +487,8 @@ pub(crate) fn upload(
         )
         .part(
             "file",
-            reqwest::blocking::multipart::Part::bytes(png)
-                .mime_str("image/png")
+            reqwest::blocking::multipart::Part::bytes(media.bytes)
+                .mime_str(media.mime)
                 .map_err(|e| e.to_string())?,
         );
 

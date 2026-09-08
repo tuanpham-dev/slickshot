@@ -12,6 +12,7 @@
 // defined ahead of the editor export path that calls them (plan T3.1-T3.2).
 #![allow(dead_code)]
 
+pub mod clipboard;
 pub mod gif;
 pub mod pill;
 pub mod transform;

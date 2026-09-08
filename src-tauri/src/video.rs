@@ -467,6 +467,130 @@ pub fn video_discard(app: AppHandle, id: String) -> CommandResult<()> {
     Ok(())
 }
 
+/// Whether the configured host accepts video at all. Imgur and imgbb are
+/// image-only, so the editor hides Upload rather than offering a button that
+/// can only fail.
+#[tauri::command]
+pub fn video_upload_supported(app: AppHandle) -> bool {
+    use crate::settings::UploadProvider;
+    let settings = crate::settings::get_settings(app).unwrap_or_default();
+    matches!(
+        settings.upload_provider,
+        UploadProvider::Catbox | UploadProvider::S3 | UploadProvider::Gdrive
+    )
+}
+
+/// Exports the prepared trim to a temporary MP4 and uploads that.
+///
+/// Separate from `video_export` because the file never belongs anywhere on
+/// disk: it is built, sent, and deleted.
+#[tauri::command]
+pub async fn video_upload(app: AppHandle) -> CommandResult<crate::upload::UploadResult> {
+    let req = app
+        .state::<PendingVideoExport>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| CommandError::Image("no export was prepared".into()))?;
+
+    let src = app
+        .state::<VideoStore>()
+        .get(&req.id)
+        .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
+
+    let temp = std::env::temp_dir().join(format!("slickshot-upload-{}.mp4", uuid::Uuid::new_v4()));
+    let worker_app = app.clone();
+    let worker_temp = temp.clone();
+    let built = tauri::async_runtime::spawn_blocking(move || {
+        run_export(&worker_app, &src, &worker_temp, &req, None)
+    })
+    .await
+    .map_err(|e| CommandError::Image(e.to_string()))?;
+    if let Err(e) = built {
+        let _ = std::fs::remove_file(&temp);
+        return Err(e);
+    }
+
+    let bytes = std::fs::read(&temp).map_err(|e| CommandError::Image(e.to_string()))?;
+    let uploaded_at = crate::upload::filename_timestamp_rfc3339();
+    let result = crate::upload::upload_and_record(
+        &app,
+        crate::upload::UploadMedia::mp4(bytes, &uploaded_at),
+    );
+    // Whether it uploaded or not, the temp copy has no reason to survive.
+    let _ = std::fs::remove_file(&temp);
+    result
+}
+
+/// Whether the prepared export would change anything, or is just the whole
+/// clip as it already is on disk.
+fn is_untouched(req: &VideoExportRequest, info: &VideoInfo) -> bool {
+    req.range.start_ms == 0
+        && req.range.end_ms >= info.duration_ms
+        && (req.speed - 1.0).abs() < 1e-3
+        && req.crop.is_none()
+        && req.censors.is_empty()
+        && req.output_size == (info.width, info.height)
+        && req.format == VideoFormat::Mp4
+}
+
+/// Puts the recording on the clipboard as a file, so pasting into Finder
+/// copies the MP4 and pasting into a mail or chat window attaches it.
+///
+/// Uses the *prepared* export, not the raw file: someone who has just trimmed
+/// a clip and pressed Copy file means the trim, the same as Save As does. An
+/// untrimmed, unmodified clip short-circuits to the file already on disk
+/// rather than re-encoding it for nothing.
+#[tauri::command]
+pub async fn video_copy_file(app: AppHandle) -> CommandResult<()> {
+    let req = app
+        .state::<PendingVideoExport>()
+        .0
+        .lock()
+        .unwrap()
+        .take()
+        .ok_or_else(|| CommandError::Image("no export was prepared".into()))?;
+
+    let src = app
+        .state::<VideoStore>()
+        .get(&req.id)
+        .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
+
+    let info = crate::record::default_backend()
+        .probe(&src)
+        .map_err(|e| CommandError::Image(e.to_string()))?;
+    if is_untouched(&req, &info) {
+        return crate::record::clipboard::copy_file(&src).map_err(CommandError::Image);
+    }
+
+    // Named, not a UUID: pasting in Finder creates a file with this name, and
+    // it lives beside the other in-progress recordings so the 24h sweep
+    // eventually clears it.
+    let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
+    let name = crate::export::recording_quicksave_file(&settings)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "Recording.mp4".into());
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| CommandError::Image(e.to_string()))?
+        .join("recordings");
+    std::fs::create_dir_all(&dir).map_err(|e| CommandError::Image(e.to_string()))?;
+    let dest = dir.join(name);
+
+    let worker_app = app.clone();
+    let worker_dest = dest.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        run_export(&worker_app, &src, &worker_dest, &req, None)
+    })
+    .await
+    .map_err(|e| CommandError::Image(e.to_string()))??;
+
+    crate::record::clipboard::copy_file(&dest).map_err(CommandError::Image)
+}
+
 /// Shows the recording in the system file manager.
 #[tauri::command]
 pub fn video_reveal(app: AppHandle, id: String) -> CommandResult<()> {

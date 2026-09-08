@@ -257,7 +257,7 @@ pub async fn thumbnail_action(app: AppHandle, action: ThumbnailAction) -> Comman
         }
         ThumbnailAction::Upload => {
             let png = crate::images::encode_png(&image);
-            let result = crate::upload::upload_and_record(&app, png)?;
+            let result = crate::upload::upload_and_record(&app, crate::upload::UploadMedia::png(png))?;
             // The URL is the only useful artifact of an upload, and the
             // thumbnail is about to close, so put it where it can be pasted.
             crate::export::copy_text_to_clipboard(result.url)?;

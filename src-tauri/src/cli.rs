@@ -324,7 +324,7 @@ pub fn run_headless(cmd: CliCommand) -> Result<(), String> {
             let png_bytes = crate::images::encode_png(&img);
             let settings = load_settings_headless();
             let timestamp = crate::upload::filename_timestamp_rfc3339();
-            let result = crate::upload::upload_core(&settings, png_bytes, &timestamp)?;
+            let result = crate::upload::upload_core(&settings, crate::upload::UploadMedia::png(png_bytes), &timestamp)?;
             println!("{}", result.url);
             Ok(())
         }
