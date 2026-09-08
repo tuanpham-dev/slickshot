@@ -598,6 +598,20 @@ export type Censor = { rect: PhysRect } & CensorWhen & CensorMode;
 
 export type VideoDest = { kind: "path"; path: string } | { kind: "quicksave" };
 
+export interface PlanSegment {
+  src_start_ms: number;
+  src_end_ms: number;
+  out_start_ms: number;
+  out_end_ms: number;
+  rate: number;
+}
+
+export interface ZoomEffect {
+  start_ms: number;
+  end_ms: number;
+  rect: PhysRect;
+}
+
 export interface VideoExportRequest {
   id: string;
   range: TimeRange;
@@ -611,6 +625,10 @@ export interface VideoExportRequest {
   keep_audio?: boolean;
   /** GIF only; MP4 keeps the source's own frame timing. */
   gif_fps?: number | null;
+  /** The timeline's source-to-output map. Empty means the plain case: the
+   * whole trim at `speed`. */
+  plan?: PlanSegment[];
+  zooms?: ZoomEffect[];
 }
 
 export interface VideoExportResult {
@@ -631,6 +649,10 @@ export async function videoExport(overlayPng: Uint8Array): Promise<VideoExportRe
     throw new IpcError(err);
   }
 }
+
+/** Evenly spaced thumbnails as data: URIs, for the timeline filmstrip. */
+export const videoThumbnails = (id: string, count: number, height: number) =>
+  call<string[]>("video_thumbnails", { id, count, height });
 
 /** Copies the *prepared* export, so a trimmed, annotated clip copies as it
  * would save. Call `videoExportPrepare` first, exactly as Save As does; the

@@ -16,6 +16,12 @@ interface TimelineProps {
    * `null` when nothing is selected. */
   elementRange?: { start: number; end: number } | null;
   onElementRangeChange?: (range: { start: number; end: number }) => void;
+  /** Evenly spaced stills across the clip, drawn as the track's background.
+   * Empty while they are still decoding, or on a clip that would not give
+   * any up -- the track just stays plain. */
+  filmstrip?: string[];
+  /** Stretches removed by cut effects, so what survives reads at a glance. */
+  cuts?: { startMs: number; endMs: number }[];
 }
 
 type Drag = "start" | "end" | "playhead" | "elStart" | "elEnd";
@@ -33,6 +39,8 @@ export function Timeline({
   onTogglePlay,
   elementRange = null,
   onElementRangeChange,
+  filmstrip = [],
+  cuts = [],
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -106,12 +114,39 @@ export function Timeline({
 
       <div
         ref={trackRef}
-        className="relative flex-1 h-8 rounded-[var(--radius-sm)] bg-[var(--surface-2,rgba(255,255,255,0.06))] cursor-pointer"
+        className="relative flex-1 h-11 rounded-[var(--radius-sm)] overflow-hidden bg-[var(--surface-2,rgba(255,255,255,0.06))] cursor-pointer"
         onPointerDown={(e) => {
           onSeek(msAt(e.clientX));
           setDrag("playhead");
         }}
       >
+        {filmstrip.length > 0 && (
+          <div className="absolute inset-0 flex pointer-events-none">
+            {filmstrip.map((src, i) => (
+              <img
+                key={i}
+                src={src}
+                alt=""
+                className="h-full flex-1 min-w-0 object-cover opacity-90"
+                draggable={false}
+              />
+            ))}
+          </div>
+        )}
+
+        {/* Cut stretches, hatched the way they read on the lanes below. */}
+        {cuts.map((c, i) => (
+          <div
+            key={i}
+            className="absolute inset-y-0 pointer-events-none opacity-80"
+            style={{
+              left: msToPx(c.startMs, width, duration),
+              width: Math.max(1, msToPx(c.endMs, width, duration) - msToPx(c.startMs, width, duration)),
+              background:
+                "repeating-linear-gradient(45deg,rgba(180,72,63,.85),rgba(180,72,63,.85) 6px,rgba(143,52,45,.85) 6px,rgba(143,52,45,.85) 12px)",
+            }}
+          />
+        ))}
         {/* Everything outside the trim is dimmed, so what will actually be
             exported reads at a glance. */}
         <div

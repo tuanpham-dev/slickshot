@@ -209,6 +209,28 @@ pub enum VideoDest {
     Quicksave,
 }
 
+/// One stretch of the source that plays at a constant rate, and where it
+/// lands in the output. Built by the editor (`timelinePlan.ts`) so the
+/// piecewise arithmetic has one implementation rather than two; this side
+/// only looks moments up in it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PlanSegment {
+    pub src_start_ms: f64,
+    pub src_end_ms: f64,
+    pub out_start_ms: f64,
+    pub out_end_ms: f64,
+    /// 0 for a freeze: no source span, positive output span.
+    pub rate: f64,
+}
+
+/// A punch-in over a stretch of the clip.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ZoomEffect {
+    pub start_ms: u64,
+    pub end_ms: u64,
+    pub rect: PhysRect,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VideoExportRequest {
     pub id: String,
@@ -229,6 +251,58 @@ pub struct VideoExportRequest {
     /// own frame timing.
     #[serde(default)]
     pub gif_fps: Option<u32>,
+    /// The timeline's source-to-output map. Empty means the plain case --
+    /// the whole trim at `speed`, which is what every export sent before
+    /// timeline effects existed.
+    #[serde(default)]
+    pub plan: Vec<PlanSegment>,
+    #[serde(default)]
+    pub zooms: Vec<ZoomEffect>,
+}
+
+impl VideoExportRequest {
+    /// Where a source moment lands in the output, or `None` when it was cut.
+    fn map_to_output(&self, src_ms: f64) -> Option<f64> {
+        if self.plan.is_empty() {
+            // No timeline effects: the old single-speed behaviour.
+            let speed = (self.speed as f64).max(0.01);
+            return Some((src_ms - self.range.start_ms as f64).max(0.0) / speed);
+        }
+        for seg in &self.plan {
+            if seg.rate <= 0.0 {
+                continue;
+            }
+            if src_ms >= seg.src_start_ms && src_ms < seg.src_end_ms {
+                return Some(seg.out_start_ms + (src_ms - seg.src_start_ms) / seg.rate);
+            }
+        }
+        // The trim's final instant belongs to the last playing segment.
+        let last = self.plan.iter().rev().find(|s| s.rate > 0.0)?;
+        if (src_ms - last.src_end_ms).abs() < 0.5 {
+            return Some(last.out_end_ms);
+        }
+        None
+    }
+
+    fn out_duration_ms(&self) -> u64 {
+        if self.plan.is_empty() {
+            let speed = (self.speed as f64).max(0.01);
+            return ((self.range.duration_ms() as f64) / speed) as u64;
+        }
+        self.plan
+            .iter()
+            .map(|s| s.out_end_ms)
+            .fold(0.0f64, f64::max) as u64
+    }
+
+    fn zoom_at(&self, src_ms: u64) -> Option<PhysRect> {
+        // Later wins, so a zoom drawn over another behaves like the top one.
+        self.zooms
+            .iter()
+            .rev()
+            .find(|z| src_ms >= z.start_ms && src_ms < z.end_ms)
+            .map(|z| z.rect)
+    }
 }
 
 #[derive(Default)]
@@ -482,9 +556,14 @@ fn process_frame(
     prepared: &Prepared,
     crop: Option<PhysRect>,
     at_ms: u64,
+    zoom: Option<PhysRect>,
 ) {
-    if let Some(crop) = crop {
-        *frame = transform::crop(frame, crop);
+    // A zoom is just a tighter crop for the moments it covers, and it wins
+    // over the export's own crop rather than stacking with it -- two crops
+    // composed would make the punch-in depend on where the export crop
+    // happened to be.
+    if let Some(rect) = zoom.or(crop) {
+        *frame = transform::crop(frame, rect);
     }
     if !prepared.censors.is_empty() {
         transform::apply_censors_at(frame, &prepared.censors, Some(at_ms));
@@ -511,17 +590,31 @@ fn run_export(
 
     match req.format {
         VideoFormat::Mp4 => {
+            // The shim time-stretches audio by one uniform rate, which a
+            // piecewise timeline has no equivalent of -- a cut or a freeze
+            // would leave the sound running past the picture. So audio rides
+            // along only for the plain single-speed case, and the editor says
+            // so before you export.
+            let uniform = req.plan.is_empty();
+            // The shim ends the output timeline at `trim_duration / speed`,
+            // so with a piecewise plan -- where a cut makes the output
+            // *shorter* than that -- it would hold the closing frame to pad
+            // the difference. Handing it the ratio the plan actually produces
+            // keeps that calculation right. Audio is off in this case anyway,
+            // which is the parameter's only other use.
+            let out_ms = req.out_duration_ms().max(1) as f32;
+            let effective_speed = if uniform {
+                req.speed
+            } else {
+                (req.range.duration_ms().max(1) as f32) / out_ms
+            };
             let opts = TranscodeOptions {
                 range: req.range,
-                speed: req.speed,
+                speed: effective_speed,
                 crop: req.crop,
                 output: req.output_size,
-                keep_audio: req.keep_audio,
+                keep_audio: req.keep_audio && uniform,
             };
-            // The shim's audio path already time-stretches by `speed`; the
-            // video side is this callback rewriting each frame's timestamp,
-            // so the two land on the same duration.
-            let speed = req.speed.max(0.01) as f64;
             let mut last_report = 0u64;
             backend
                 .transcode(src, dest, &opts, &mut |mut frame| {
@@ -531,9 +624,18 @@ fn run_export(
                     // (`decode_frames`, used by the GIF branch below, gives
                     // absolute times already.)
                     let at_ms = req.range.start_ms + frame.pts_ms;
-                    process_frame(&mut frame.image, &prepared, req.crop, at_ms);
+                    // A cut range simply produces no frame, which is what
+                    // makes everything after it move earlier.
+                    let out_ms = req.map_to_output(at_ms as f64)?;
+                    process_frame(
+                        &mut frame.image,
+                        &prepared,
+                        req.crop,
+                        at_ms,
+                        req.zoom_at(at_ms),
+                    );
                     let elapsed = frame.pts_ms;
-                    frame.pts_ms = (frame.pts_ms as f64 / speed) as u64;
+                    frame.pts_ms = out_ms.max(0.0) as u64;
                     // Throttled: a 30fps export would otherwise emit an event
                     // per frame and drown the webview in IPC.
                     if elapsed.saturating_sub(last_report) >= 250 {
@@ -564,21 +666,41 @@ fn run_export(
             } else {
                 (out_w, out_h)
             };
-            // Decoding at the *output* rate already applies the speed change:
-            // asking for `fps * speed` source frames per second and then
-            // playing them back at `fps` is what makes the clip faster.
-            let src_fps = ((fps as f32 * req.speed).round() as u32).clamp(1, 120);
+            // Fast stretches need more source frames than the output rate to
+            // stay smooth, so the decode runs at the highest rate the plan
+            // asks for anywhere.
+            let fastest = req
+                .plan
+                .iter()
+                .map(|s| s.rate)
+                .fold(req.speed as f64, f64::max)
+                .max(1.0);
+            let src_fps = ((fps as f64 * fastest).round() as u32).clamp(1, 120);
 
-            let mut frames: Vec<RgbaImage> = Vec::new();
+            // Collected with the output time each frame lands at, then
+            // resampled onto an even grid below. A GIF carries an explicit
+            // delay per frame, so a freeze has to become repeated frames --
+            // unlike the MP4 path, where a gap in timestamps holds the last
+            // one on screen by itself.
+            let mut timed: Vec<(f64, RgbaImage)> = Vec::new();
             let mut last_report = 0u64;
             backend
                 .decode_frames(src, req.range, src_fps, &mut |mut frame| {
                     // Already absolute clip time, unlike the transcode path.
-                    process_frame(&mut frame.image, &prepared, req.crop, frame.pts_ms);
+                    let Some(out_ms) = req.map_to_output(frame.pts_ms as f64) else {
+                        return true; // cut
+                    };
+                    process_frame(
+                        &mut frame.image,
+                        &prepared,
+                        req.crop,
+                        frame.pts_ms,
+                        req.zoom_at(frame.pts_ms),
+                    );
                     if frame.image.dimensions() != gif_size {
                         frame.image = transform::resize(&frame.image, gif_size.0, gif_size.1);
                     }
-                    frames.push(frame.image);
+                    timed.push((out_ms, frame.image));
                     let elapsed = frame.pts_ms.saturating_sub(req.range.start_ms);
                     if elapsed.saturating_sub(last_report) >= 250 {
                         last_report = elapsed;
@@ -594,6 +716,7 @@ fn run_export(
                 })
                 .map_err(|e| CommandError::Image(e.to_string()))?;
 
+            let frames = resample_to_output(timed, fps, req.out_duration_ms());
             let file = std::fs::File::create(dest).map_err(|e| CommandError::Image(e.to_string()))?;
             crate::record::gif::encode(frames, fps, std::io::BufWriter::new(file))
                 .map_err(|e| CommandError::Image(e.to_string()))?;
@@ -610,6 +733,40 @@ fn run_export(
     Ok(dest.to_path_buf())
 }
 
+/// Puts frames carrying output timestamps onto an even 1/fps grid.
+///
+/// Each slot shows the most recent frame at or before it, so a freeze (whose
+/// source frames all land at one output moment, followed by a gap) repeats
+/// that frame for as long as the hold lasts, and a fast stretch drops the
+/// frames it does not need.
+fn resample_to_output(
+    timed: Vec<(f64, RgbaImage)>,
+    fps: u32,
+    out_duration_ms: u64,
+) -> Vec<RgbaImage> {
+    if timed.is_empty() {
+        return Vec::new();
+    }
+    let interval = 1000.0 / fps.max(1) as f64;
+    // The frames arrive in source order, which is output order too: the plan
+    // is monotonic by construction.
+    let mut out = Vec::new();
+    let mut cursor = 0usize;
+    let mut slot = 0.0f64;
+    let end = out_duration_ms as f64;
+    // Guard against a pathological plan asking for a million frames.
+    let cap = 20_000usize;
+
+    while slot <= end && out.len() < cap {
+        while cursor + 1 < timed.len() && timed[cursor + 1].0 <= slot + 1e-6 {
+            cursor += 1;
+        }
+        out.push(timed[cursor].1.clone());
+        slot += interval;
+    }
+    out
+}
+
 /// Reports a recording's dimensions, duration and whether it has sound.
 #[tauri::command]
 pub async fn video_probe(app: AppHandle, id: String) -> CommandResult<VideoInfo> {
@@ -620,6 +777,101 @@ pub async fn video_probe(app: AppHandle, id: String) -> CommandResult<VideoInfo>
     crate::record::default_backend()
         .probe(&path)
         .map_err(|e| CommandError::Image(e.to_string()))
+}
+
+/// Standard base64 with padding, for `data:` URIs.
+///
+/// Hand-rolled rather than adding a crate: `drive.rs` already carries a
+/// URL-safe variant for the same reason, and this is the only other place
+/// that needs one.
+fn base64_standard(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let n = ((b[0] as u32) << 16) | ((b[1] as u32) << 8) | b[2] as u32;
+        out.push(ALPHABET[(n >> 18) as usize & 63] as char);
+        out.push(ALPHABET[(n >> 12) as usize & 63] as char);
+        // The tail is padded rather than truncated: a decoder that expects
+        // padding rejects the whole string otherwise.
+        out.push(if chunk.len() > 1 {
+            ALPHABET[(n >> 6) as usize & 63] as char
+        } else {
+            '='
+        });
+        out.push(if chunk.len() > 2 {
+            ALPHABET[n as usize & 63] as char
+        } else {
+            '='
+        });
+    }
+    out
+}
+
+/// Evenly spaced thumbnails across a recording, as PNG bytes, for the
+/// timeline's filmstrip.
+///
+/// Decoded here rather than by seeking a `<video>` repeatedly in the webview:
+/// a dozen seeks on a long clip is slow and stutters playback, while one
+/// decode pass over the whole range is cheap.
+#[tauri::command]
+pub async fn video_thumbnails(
+    app: AppHandle,
+    id: String,
+    count: u32,
+    height: u32,
+) -> CommandResult<Vec<String>> {
+    let path = app
+        .state::<VideoStore>()
+        .get(&id)
+        .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let backend = crate::record::default_backend();
+        let info = backend
+            .probe(&path)
+            .map_err(|e| CommandError::Image(e.to_string()))?;
+        let count = count.clamp(1, 40);
+        let height = height.clamp(16, 200);
+        let width = ((info.width as f64) * (height as f64) / (info.height.max(1) as f64))
+            .round()
+            .max(1.0) as u32;
+
+        // One frame per slot across the whole clip: the decoder already paces
+        // to a requested rate and holds frames across gaps, so asking for
+        // `count` over the duration gives evenly spaced stills.
+        let range = TimeRange {
+            start_ms: 0,
+            end_ms: info.duration_ms.max(1),
+        };
+        let fps = ((count as f64 * 1000.0) / info.duration_ms.max(1) as f64).ceil() as u32;
+
+        let mut out = Vec::new();
+        backend
+            .decode_frames(&path, range, fps.max(1), &mut |frame| {
+                if out.len() >= count as usize {
+                    return false;
+                }
+                let small = transform::resize(&frame.image, width, height);
+                let mut png = Vec::new();
+                if small
+                    .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+                    .is_ok()
+                {
+                    out.push(format!("data:image/png;base64,{}", base64_standard(&png)));
+                }
+                true
+            })
+            .map_err(|e| CommandError::Image(e.to_string()))?;
+        Ok(out)
+    })
+    .await
+    .map_err(|e| CommandError::Image(e.to_string()))?
 }
 
 /// Drops a recording the user chose not to keep, deleting the temp file. Only
@@ -897,6 +1149,8 @@ mod tests {
             censors: Vec::new(),
             keep_audio: false,
             gif_fps: None,
+            plan: Vec::new(),
+            zooms: Vec::new(),
         }
     }
 
@@ -905,7 +1159,7 @@ mod tests {
         let mut frame = RgbaImage::from_pixel(100, 80, image::Rgba([10, 20, 30, 255]));
         let mut req = request((20, 20));
         req.crop = Some(PhysRect::new(10, 10, 40, 40));
-        process_frame(&mut frame, &Prepared::whole_clip(&req, None), req.crop, 0);
+        process_frame(&mut frame, &Prepared::whole_clip(&req, None), req.crop, 0, None);
         assert_eq!(frame.dimensions(), (20, 20), "the output size wins");
     }
 
@@ -913,7 +1167,7 @@ mod tests {
     fn a_frame_with_no_crop_is_still_resized() {
         let mut frame = RgbaImage::from_pixel(64, 64, image::Rgba([1, 2, 3, 255]));
         let req = request((32, 16));
-        process_frame(&mut frame, &Prepared::whole_clip(&req, None), None, 0);
+        process_frame(&mut frame, &Prepared::whole_clip(&req, None), None, 0, None);
         assert_eq!(frame.dimensions(), (32, 16));
     }
 
@@ -932,7 +1186,7 @@ mod tests {
         let mut overlay = RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 0]));
         overlay.put_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
 
-        process_frame(&mut frame, &Prepared::whole_clip(&req, Some(&overlay)), None, 0);
+        process_frame(&mut frame, &Prepared::whole_clip(&req, Some(&overlay)), None, 0, None);
         assert_eq!(
             frame.get_pixel(2, 2).0,
             [255, 0, 0, 255],
@@ -961,7 +1215,7 @@ mod tests {
             mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
         }];
         let prepared = Prepared::whole_clip(&req, None);
-        process_frame(&mut frame, &prepared, req.crop, 0);
+        process_frame(&mut frame, &prepared, req.crop, 0, None);
 
         assert_eq!(
             frame.get_pixel(15, 15).0,
@@ -987,7 +1241,7 @@ mod tests {
         overlay.put_pixel(120, 120, image::Rgba([255, 0, 0, 255]));
 
         let prepared = Prepared::whole_clip(&req, Some(&overlay));
-        process_frame(&mut frame, &prepared, req.crop, 0);
+        process_frame(&mut frame, &prepared, req.crop, 0, None);
         assert_eq!(
             frame.get_pixel(70, 70).0,
             [255, 0, 0, 255],
@@ -1008,7 +1262,7 @@ mod tests {
             mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
         }];
         let prepared = Prepared::whole_clip(&req, None);
-        process_frame(&mut frame, &prepared, None, 0);
+        process_frame(&mut frame, &prepared, None, 0, None);
 
         assert_eq!(frame.dimensions(), (100, 100));
         // The censored top-left quarter of the source is the top-left quarter
@@ -1089,7 +1343,7 @@ mod tests {
 
         for (at, censored) in [(0u64, false), (999, false), (1_000, true), (1_999, true), (2_000, false)] {
             let mut frame = RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]));
-            process_frame(&mut frame, &prepared, None, at);
+            process_frame(&mut frame, &prepared, None, at, None);
             let black = frame.get_pixel(4, 4).0 == [0, 0, 0, 255];
             assert_eq!(black, censored, "at {at}ms");
         }
@@ -1116,15 +1370,154 @@ mod tests {
 
         for (at, expect) in [(0u64, [255, 0, 0, 255]), (999, [255, 0, 0, 255]), (1_000, [0, 0, 255, 255])] {
             let mut frame = RgbaImage::from_pixel(4, 4, image::Rgba([10, 10, 10, 255]));
-            process_frame(&mut frame, &prepared, None, at);
+            process_frame(&mut frame, &prepared, None, at, None);
             assert_eq!(frame.get_pixel(1, 1).0, expect, "at {at}ms");
         }
 
         // Past every segment: the frame is left alone rather than keeping the
         // last overlay on screen forever.
         let mut frame = RgbaImage::from_pixel(4, 4, image::Rgba([10, 10, 10, 255]));
-        process_frame(&mut frame, &prepared, None, 5_000);
+        process_frame(&mut frame, &prepared, None, 5_000, None);
         assert_eq!(frame.get_pixel(1, 1).0, [10, 10, 10, 255]);
+    }
+
+    fn planned(plan: Vec<PlanSegment>) -> VideoExportRequest {
+        let mut req = request((8, 8));
+        req.range = TimeRange { start_ms: 0, end_ms: 10_000 };
+        req.plan = plan;
+        req
+    }
+
+    fn seg(src: (f64, f64), out: (f64, f64), rate: f64) -> PlanSegment {
+        PlanSegment {
+            src_start_ms: src.0,
+            src_end_ms: src.1,
+            out_start_ms: out.0,
+            out_end_ms: out.1,
+            rate,
+        }
+    }
+
+    #[test]
+    fn an_empty_plan_is_the_old_single_speed_behaviour() {
+        let mut req = request((8, 8));
+        req.range = TimeRange { start_ms: 1_000, end_ms: 5_000 };
+        req.speed = 2.0;
+        // Trim-relative and divided by the speed, exactly as before.
+        assert_eq!(req.map_to_output(1_000.0), Some(0.0));
+        assert_eq!(req.map_to_output(3_000.0), Some(1_000.0));
+        assert_eq!(req.out_duration_ms(), 2_000);
+    }
+
+    #[test]
+    fn a_cut_range_maps_to_nothing() {
+        // 0-2s plays, 2-4s is cut, 4-10s plays and starts right after.
+        let req = planned(vec![
+            seg((0.0, 2_000.0), (0.0, 2_000.0), 1.0),
+            seg((4_000.0, 10_000.0), (2_000.0, 8_000.0), 1.0),
+        ]);
+        assert_eq!(req.map_to_output(1_000.0), Some(1_000.0));
+        assert_eq!(req.map_to_output(3_000.0), None, "inside the cut");
+        assert_eq!(req.map_to_output(5_000.0), Some(3_000.0));
+        assert_eq!(req.out_duration_ms(), 8_000);
+    }
+
+    #[test]
+    fn a_freeze_segment_consumes_no_source() {
+        // A freeze is a zero-rate segment; source moments must never map into
+        // it, or every frame during the hold would land on one timestamp.
+        let req = planned(vec![
+            seg((0.0, 4_000.0), (0.0, 4_000.0), 1.0),
+            seg((4_000.0, 4_000.0), (4_000.0, 6_000.0), 0.0),
+            seg((4_000.0, 10_000.0), (6_000.0, 12_000.0), 1.0),
+        ]);
+        assert_eq!(req.map_to_output(4_500.0), Some(6_500.0));
+        assert_eq!(req.out_duration_ms(), 12_000);
+    }
+
+    #[test]
+    fn a_speed_segment_compresses_only_its_own_span() {
+        let req = planned(vec![
+            seg((0.0, 2_000.0), (0.0, 2_000.0), 1.0),
+            seg((2_000.0, 6_000.0), (2_000.0, 4_000.0), 2.0),
+            seg((6_000.0, 10_000.0), (4_000.0, 8_000.0), 1.0),
+        ]);
+        assert_eq!(req.map_to_output(4_000.0), Some(3_000.0));
+        assert_eq!(req.map_to_output(7_000.0), Some(5_000.0));
+    }
+
+    #[test]
+    fn the_last_instant_of_the_plan_still_maps() {
+        let req = planned(vec![seg((0.0, 10_000.0), (0.0, 10_000.0), 1.0)]);
+        assert_eq!(req.map_to_output(10_000.0), Some(10_000.0));
+        assert_eq!(req.map_to_output(11_000.0), None);
+    }
+
+    #[test]
+    fn a_zoom_applies_only_inside_its_range() {
+        let mut req = request((8, 8));
+        req.zooms = vec![ZoomEffect {
+            start_ms: 1_000,
+            end_ms: 3_000,
+            rect: PhysRect::new(10, 20, 30, 40),
+        }];
+        assert!(req.zoom_at(999).is_none());
+        assert_eq!(req.zoom_at(2_000), Some(PhysRect::new(10, 20, 30, 40)));
+        assert!(req.zoom_at(3_000).is_none());
+    }
+
+    #[test]
+    fn a_zoom_crops_instead_of_the_export_crop() {
+        // Two crops composed would make the punch-in depend on where the
+        // export crop happened to be, so the zoom replaces it.
+        let mut frame = RgbaImage::from_pixel(100, 100, image::Rgba([255, 255, 255, 255]));
+        let mut req = request((20, 20));
+        req.crop = Some(PhysRect::new(0, 0, 80, 80));
+        let prepared = Prepared::new(&req, Vec::new());
+        process_frame(
+            &mut frame,
+            &prepared,
+            req.crop,
+            0,
+            Some(PhysRect::new(10, 10, 40, 40)),
+        );
+        assert_eq!(frame.dimensions(), (20, 20));
+    }
+
+    #[test]
+    fn resampling_repeats_a_held_frame_and_stops_at_the_end() {
+        let red = RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
+        let blue = RgbaImage::from_pixel(2, 2, image::Rgba([0, 0, 255, 255]));
+        // One frame at 0, the next only at 1000ms: a one-second hold.
+        let out = resample_to_output(vec![(0.0, red), (1_000.0, blue)], 10, 2_000);
+        assert_eq!(out.len(), 21, "10fps over 2s, inclusive of both ends");
+        assert_eq!(out[0].get_pixel(0, 0).0, [255, 0, 0, 255]);
+        assert_eq!(out[9].get_pixel(0, 0).0, [255, 0, 0, 255], "still held at 900ms");
+        assert_eq!(out[10].get_pixel(0, 0).0, [0, 0, 255, 255], "swaps at 1000ms");
+    }
+
+    #[test]
+    fn resampling_an_empty_decode_yields_nothing() {
+        assert!(resample_to_output(Vec::new(), 10, 1_000).is_empty());
+    }
+
+    #[test]
+    fn base64_matches_the_standard_alphabet_and_padding() {
+        // The RFC 4648 vectors -- a data: URI is rejected outright if the
+        // padding is wrong, and that failure looks like "the image is broken".
+        assert_eq!(base64_standard(b""), "");
+        assert_eq!(base64_standard(b"f"), "Zg==");
+        assert_eq!(base64_standard(b"fo"), "Zm8=");
+        assert_eq!(base64_standard(b"foo"), "Zm9v");
+        assert_eq!(base64_standard(b"foob"), "Zm9vYg==");
+        assert_eq!(base64_standard(b"fooba"), "Zm9vYmE=");
+        assert_eq!(base64_standard(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn base64_covers_the_high_bytes() {
+        assert_eq!(base64_standard(&[0xff, 0xff, 0xff]), "////");
+        assert_eq!(base64_standard(&[0x00, 0x00, 0x00]), "AAAA");
     }
 
     #[test]

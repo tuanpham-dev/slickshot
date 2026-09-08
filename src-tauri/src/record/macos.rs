@@ -973,6 +973,89 @@ mod live_tests {
         let _ = std::fs::remove_file(&gif);
     }
 
+    /// Live: a piecewise timeline -- a cut and a fast stretch -- lands on
+    /// the duration the plan says, not the trim's own length.
+    ///
+    /// The shim ends the output at `trim / speed`, so this is what catches a
+    /// cut being padded back out to full length by the closing frame.
+    #[test]
+    #[ignore]
+    fn transcodes_a_cut_and_a_speed_range() {
+        let (rect, monitor_id) = live_test_region();
+        let src_path = temp_path("slickshot-live-plan-src.mp4");
+        let dst = temp_path("slickshot-live-plan-out.mp4");
+        let backend = MacBackend;
+
+        let recording = backend
+            .start_recording(&RecordConfig {
+                rect,
+                monitor_id,
+                fps: 30,
+                show_cursor: true,
+                system_audio: false,
+                microphone: false,
+                out_path: src_path,
+            })
+            .expect("start");
+        std::thread::sleep(Duration::from_secs(8));
+        let src = recording.stop().expect("stop");
+        let before = backend.probe(&src).expect("probe");
+        println!("source: {}ms", before.duration_ms);
+
+        // Trim 0-8s; cut 2-4s; play 5-7s at 2x. Output should be
+        // 2 + 1 (5-7 at 2x) + 1 (4-5) + 1 (7-8) = 6s.
+        let range = TimeRange {
+            start_ms: 0,
+            end_ms: 8_000,
+        };
+        let out_ms = 6_000f32;
+        let opts = TranscodeOptions {
+            range,
+            // The ratio the plan produces, which is what `run_export` passes.
+            speed: (range.duration_ms() as f32) / out_ms,
+            crop: None,
+            output: (before.width, before.height),
+            keep_audio: false,
+        };
+
+        let map = |src_ms: f64| -> Option<f64> {
+            if (2_000.0..4_000.0).contains(&src_ms) {
+                return None; // cut
+            }
+            Some(if src_ms < 2_000.0 {
+                src_ms
+            } else if src_ms < 5_000.0 {
+                src_ms - 2_000.0
+            } else if src_ms < 7_000.0 {
+                3_000.0 + (src_ms - 5_000.0) / 2.0
+            } else {
+                4_000.0 + (src_ms - 7_000.0)
+            })
+        };
+
+        let mut kept = 0;
+        backend
+            .transcode(&src, &dst, &opts, &mut |mut frame| {
+                let out = map(frame.pts_ms as f64)?;
+                frame.pts_ms = out as u64;
+                kept += 1;
+                Some(frame)
+            })
+            .expect("transcode");
+
+        let after = backend.probe(&dst).expect("probe out");
+        println!("output: {}ms from {kept} frames", after.duration_ms);
+        assert!(
+            (5_800..=6_200).contains(&after.duration_ms),
+            "the plan says 6000ms; got {}ms -- a cut padded back out to the \
+             trim's length is what this is here to catch",
+            after.duration_ms
+        );
+
+        let _ = std::fs::remove_file(&src);
+        let _ = std::fs::remove_file(&dst);
+    }
+
     /// Live: records with both audio sources and checks the file really has
     /// two separate tracks.
     ///

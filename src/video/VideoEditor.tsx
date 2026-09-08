@@ -4,6 +4,8 @@ import { Canvas } from "../editor/Canvas";
 import { useEditorStore } from "../editor/store";
 import { flattenToPng } from "../editor/export";
 import { VideoToolbar } from "./VideoToolbar";
+import { EffectLanes } from "./EffectLanes";
+import { buildPlan, isCut, zoomAt, type VideoEffect } from "./timelinePlan";
 import {
   extractCensors,
   overlaySegments,
@@ -17,12 +19,13 @@ import {
   videoDiscard,
   videoProbe,
   videoReveal,
+  videoThumbnails,
   videoUrl,
   type VideoInfo,
 } from "../lib/ipc";
 import { Timeline } from "./Timeline";
 import { VideoExportBar } from "./VideoExportBar";
-import { clampTrim, formatTimecode, outputDuration, type Trim } from "./trim";
+import { clampTrim, formatTimecode, type Trim } from "./trim";
 
 const FORMATS = [
   { value: "mp4", label: "MP4" },
@@ -69,6 +72,9 @@ export function VideoEditor({ params }: VideoEditorProps) {
   const [playing, setPlaying] = useState(false);
   const [speed, setSpeed] = useState("1");
   const [format, setFormat] = useState<"mp4" | "gif">("mp4");
+  const [effects, setEffects] = useState<VideoEffect[]>([]);
+  const [selectedEffect, setSelectedEffect] = useState<string | null>(null);
+  const [strip, setStrip] = useState<string[]>([]);
   const [baseImage, setBaseImage] = useState<ImageBitmap | null>(null);
 
   const tool = useEditorStore((s) => s.tool);
@@ -104,6 +110,14 @@ export function VideoEditor({ params }: VideoEditorProps) {
         // A crop left over from the previous clip would silently apply to
         // this one -- the window is reused for a second recording.
         setCropRect(null);
+        setEffects([]);
+        setSelectedEffect(null);
+        setStrip([]);
+        videoThumbnails(videoId, 14, 44)
+          .then(setStrip)
+          // A filmstrip is a nicety; a clip that will not decode stills is
+          // still perfectly editable.
+          .catch(() => setStrip([]));
         // A 1x1 stand-in until the first frame is grabbed; Canvas needs a
         // bitmap to exist before the video has decoded anything.
         createImageBitmap(new ImageData(1, 1)).then(setBaseImage).catch(() => {});
@@ -125,6 +139,16 @@ export function VideoEditor({ params }: VideoEditorProps) {
     if (!video) return;
     const onTime = () => {
       const ms = video.currentTime * 1000;
+      // A cut is removed from the export, so previewing through it would show
+      // something the finished clip does not have.
+      const cut = effects.find(
+        (e) => e.kind === "cut" && ms >= e.startMs && ms < e.endMs,
+      );
+      if (cut) {
+        video.currentTime = cut.endMs / 1000;
+        setCurrent(cut.endMs);
+        return;
+      }
       if (ms >= trim.end) {
         video.pause();
         video.currentTime = trim.start / 1000;
@@ -136,7 +160,7 @@ export function VideoEditor({ params }: VideoEditorProps) {
     };
     video.addEventListener("timeupdate", onTime);
     return () => video.removeEventListener("timeupdate", onTime);
-  }, [trim, videoEl]);
+  }, [trim, videoEl, effects]);
 
   useEffect(() => {
     const video = videoRef.current;
@@ -225,7 +249,7 @@ export function VideoEditor({ params }: VideoEditorProps) {
       video.pause();
       setPlaying(false);
     }
-  }, [trim, videoEl]);
+  }, [trim, videoEl, effects]);
 
   useEffect(() => {
     function onKeyDown(e: KeyboardEvent) {
@@ -268,7 +292,16 @@ export function VideoEditor({ params }: VideoEditorProps) {
     );
   }
 
-  const outMs = outputDuration(trim, Number(speed));
+  // One source of truth for how long the export will be: the same plan the
+  // backend is handed, so the number under the clip cannot disagree with it.
+  const plan = buildPlan(
+    { start: trim.start, end: trim.end },
+    effects,
+    Number(speed),
+  );
+  const outMs = plan.outDurationMs;
+  const activeZoom = zoomAt(effects, current);
+  const atCut = isCut(effects, current);
 
   const selected = shapes.find((sh) => sh.id === selectedId) ?? null;
   // Only a shape that has actually been given bounds gets the bar; an
@@ -292,6 +325,39 @@ export function VideoEditor({ params }: VideoEditorProps) {
   const outputSize: [number, number] = resize
     ? [even(resize.w), even(resize.h)]
     : [even(cropped.w), even(cropped.h)];
+
+  /** Adds an effect starting at the playhead.
+   *
+   * Two seconds long, or to the end if there is less left: long enough to
+   * grab and drag, short enough not to swallow the whole clip. A freeze has
+   * no source span at all -- it holds one moment. */
+  function addEffect(kind: VideoEffect["kind"]) {
+    const start = Math.round(current);
+    const end = Math.min(info!.duration_ms, start + 2_000);
+    const id = `${kind}-${Date.now().toString(36)}`;
+    const base = { id, startMs: start, endMs: end };
+    const effect: VideoEffect =
+      kind === "cut"
+        ? { ...base, kind: "cut" }
+        : kind === "freeze"
+          ? { ...base, kind: "freeze", endMs: start, holdMs: 1_000 }
+          : kind === "speed"
+            ? { ...base, kind: "speed", rate: 2 }
+            : {
+                ...base,
+                kind: "zoom",
+                // Centred, at half size: a punch-in you then drag and resize,
+                // rather than making the user draw one before seeing anything.
+                rect: {
+                  x: Math.round(info!.width / 4),
+                  y: Math.round(info!.height / 4),
+                  w: Math.round(info!.width / 2),
+                  h: Math.round(info!.height / 2),
+                },
+              };
+    setEffects((all) => [...all, effect]);
+    setSelectedEffect(id);
+  }
 
   /** Flattens the annotations at the clip's full size -- one image per
    * stretch of the clip over which the visible set does not change. The
@@ -344,8 +410,34 @@ export function VideoEditor({ params }: VideoEditorProps) {
           onChange={(v) => setFormat(v as "mp4" | "gif")}
           aria-label="Export format"
         />
+        <div className="w-px h-5 bg-[var(--border)]" />
+        <div className="flex items-center gap-1">
+          {(
+            [
+              ["cut", "Cut"],
+              ["freeze", "Freeze"],
+              ["speed", "Speed"],
+              ["zoom", "Zoom"],
+            ] as const
+          ).map(([kind, label]) => (
+            <button
+              key={kind}
+              type="button"
+              className="text-[11px] px-2 py-1 rounded-[var(--radius-sm)] border border-[var(--border)] text-[var(--fg-muted)] hover:text-[var(--fg)] hover:border-[var(--fg-muted)]"
+              onClick={() => addEffect(kind)}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
         {info.has_audio && format === "gif" && (
           <span className="text-[11px] text-[var(--fg-muted)]">GIFs have no sound.</span>
+        )}
+        {info.has_audio && format === "mp4" && effects.length > 0 && (
+          <span className="text-[11px] text-[var(--fg-muted)]">
+            Audio is dropped when the timeline is edited.
+          </span>
         )}
       </div>
 
@@ -366,6 +458,21 @@ export function VideoEditor({ params }: VideoEditorProps) {
                 ref={attachVideo}
                 src={videoUrl(videoId)}
                 className="w-full h-full"
+                // Mirrors the export's punch-in, so the framing you set is
+                // the framing you get.
+                style={
+                  activeZoom
+                    ? {
+                        transform: `scale(${info.width / activeZoom.w}) translate(${
+                          (info.width / 2 - (activeZoom.x + activeZoom.w / 2)) /
+                          info.width * 100
+                        }%, ${
+                          (info.height / 2 - (activeZoom.y + activeZoom.h / 2)) /
+                          info.height * 100
+                        }%)`,
+                      }
+                    : undefined
+                }
                 preload="auto"
                 onEnded={() => setPlaying(false)}
                 onLoadedMetadata={(e) => {
@@ -395,6 +502,22 @@ export function VideoEditor({ params }: VideoEditorProps) {
           if (!selected) return;
           updateShape(selected.id, { startMs: range.start, endMs: range.end });
         }}
+        filmstrip={strip}
+        cuts={effects.filter((e) => e.kind === "cut")}
+      />
+
+      <EffectLanes
+        duration={info.duration_ms}
+        effects={effects}
+        selectedId={selectedEffect}
+        onSelect={setSelectedEffect}
+        onChange={(next) =>
+          setEffects((all) => all.map((e) => (e.id === next.id ? next : e)))
+        }
+        onRemove={(id) => {
+          setEffects((all) => all.filter((e) => e.id !== id));
+          setSelectedEffect(null);
+        }}
       />
 
       <div className="flex items-center gap-3 px-3 h-8 border-t border-[var(--border)] bg-[var(--surface)]">
@@ -402,6 +525,11 @@ export function VideoEditor({ params }: VideoEditorProps) {
           {info.width} × {info.height} · {formatTimecode(outMs)}
           {info.has_audio ? " · audio" : ""}
         </span>
+        {atCut && (
+          <span className="text-[11px] text-[var(--danger)]">
+            This moment is cut from the export
+          </span>
+        )}
 
         {selected && (
           <div className="flex items-center gap-2 ml-auto">
@@ -449,6 +577,20 @@ export function VideoEditor({ params }: VideoEditorProps) {
           crop: cropRect,
           output_size: outputSize,
           format,
+          plan: plan.segments.map((seg) => ({
+            src_start_ms: seg.srcStartMs,
+            src_end_ms: seg.srcEndMs,
+            out_start_ms: seg.outStartMs,
+            out_end_ms: seg.outEndMs,
+            rate: seg.rate,
+          })),
+          zooms: effects
+            .filter((e) => e.kind === "zoom")
+            .map((e) => ({
+              start_ms: Math.round(e.startMs),
+              end_ms: Math.round(e.endMs),
+              rect: e.kind === "zoom" ? e.rect : { x: 0, y: 0, w: 0, h: 0 },
+            })),
           // A GIF has no audio track to keep.
           keep_audio: info.has_audio && format === "mp4",
           censors: extractCensors(shapes),
