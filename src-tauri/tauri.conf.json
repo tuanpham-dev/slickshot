@@ -41,7 +41,10 @@
       "deb": {
         "depends": [
           "tesseract-ocr",
-          "tesseract-ocr-eng"
+          "tesseract-ocr-eng",
+          "gstreamer1.0-plugins-good",
+          "gstreamer1.0-plugins-bad",
+          "gstreamer1.0-plugins-ugly"
         ],
         "recommends": [
           "fonts-noto-color-emoji"
@@ -50,7 +53,10 @@
       "rpm": {
         "depends": [
           "tesseract",
-          "tesseract-langpack-eng"
+          "tesseract-langpack-eng",
+          "gstreamer1-plugins-good",
+          "gstreamer1-plugins-bad-free",
+          "gstreamer1-plugins-ugly-free"
         ],
         "recommends": [
           "google-noto-emoji-color-fonts"

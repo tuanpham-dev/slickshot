@@ -519,6 +519,27 @@ pub fn video_discard(app: AppHandle, id: String) -> CommandResult<()> {
     Ok(())
 }
 
+/// Whether recording can work on this machine.
+///
+/// macOS and Windows use frameworks that are part of the OS, so the answer is
+/// always yes there. Linux needs GStreamer and an H.264 encoder installed,
+/// which it may not have -- and a Record button that fails only once you have
+/// selected a region is worse than one that says so up front.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecordEngineStatus {
+    pub available: bool,
+    pub reason: String,
+}
+
+#[tauri::command]
+pub fn record_engine_status() -> RecordEngineStatus {
+    let status = crate::record::linux::engine_status();
+    RecordEngineStatus {
+        available: status.available,
+        reason: status.reason,
+    }
+}
+
 /// Whether the configured host accepts video at all. Imgur and imgbb are
 /// image-only, so the editor hides Upload rather than offering a button that
 /// can only fail.

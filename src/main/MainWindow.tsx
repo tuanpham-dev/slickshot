@@ -31,6 +31,8 @@ import {
   type CaptureMode,
   type MonitorInfo,
   type OcrEngineStatus,
+  recordEngineStatus,
+  type RecordEngineStatus,
 } from "../lib/ipc";
 import { IconButton } from "../ui/IconButton";
 import { Segmented } from "../ui/Segmented";
@@ -206,6 +208,7 @@ export function MainWindow() {
   const [historyTab, setHistoryTab] = useState<"captures" | "uploads">("captures");
   const [busy, setBusy] = useState(false);
   const [ocrStatus, setOcrStatus] = useState<OcrEngineStatus | null>(null);
+  const [recordStatus, setRecordStatus] = useState<RecordEngineStatus | null>(null);
   const [ocrMissingOpen, setOcrMissingOpen] = useState(false);
   const toast = useToast();
 
@@ -254,6 +257,9 @@ export function MainWindow() {
   useEffect(() => {
     ocrEngineStatus()
       .then(setOcrStatus)
+      .catch(() => {});
+    recordEngineStatus()
+      .then(setRecordStatus)
       .catch(() => {});
   }, []);
 
@@ -481,8 +487,21 @@ export function MainWindow() {
                 icon={<Video size={18} />}
                 label="Record screen"
                 shortcut={shortcutFor("record")}
-                onClick={() => trigger("record")}
+                onClick={() => {
+                  // Clicking still works, and says why rather than doing
+                  // nothing -- the same shape as the OCR tile's guidance.
+                  if (recordStatus && !recordStatus.available) {
+                    toast.show({
+                      kind: "error",
+                      title: "Recording isn't available",
+                      description: recordStatus.reason,
+                    });
+                    return;
+                  }
+                  trigger("record");
+                }}
                 disabled={busy}
+                warning={recordStatus !== null && !recordStatus.available}
               />
             </div>
             <div className="col-span-2">

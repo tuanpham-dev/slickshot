@@ -20,6 +20,8 @@ import {
   resetSettings,
   onHotkeyError,
   ocrListLangs,
+  recordEngineStatus,
+  type RecordEngineStatus,
   ocrEngineStatus,
   copyTextToClipboard,
   gdriveSignIn,
@@ -79,6 +81,7 @@ export function Settings({ onBack }: { onBack: () => void }) {
   const [resetOpen, setResetOpen] = useState(false);
   const [clearHistoryOpen, setClearHistoryOpen] = useState(false);
   const [hotkeyErrors, setHotkeyErrors] = useState<string[]>([]);
+  const [recordStatus, setRecordStatus] = useState<RecordEngineStatus | null>(null);
   const [ocrLangs, setOcrLangs] = useState<string[]>([]);
   const [ocrStatus, setOcrStatus] = useState<OcrEngineStatus | null>(null);
   const [checkingOcr, setCheckingOcr] = useState(false);
@@ -102,6 +105,9 @@ export function Settings({ onBack }: { onBack: () => void }) {
       .catch((err) => toast.show({ kind: "error", title: "Couldn't load settings", description: String(err) }));
     ocrListLangs()
       .then(setOcrLangs)
+      .catch(() => {});
+    recordEngineStatus()
+      .then(setRecordStatus)
       .catch(() => {});
     refreshOcrStatus();
     gdriveAccountQuery()
@@ -368,6 +374,9 @@ export function Settings({ onBack }: { onBack: () => void }) {
 
         <section className="flex flex-col gap-3 pt-5 border-t border-[var(--border)]">
           <h2 className="text-sm font-semibold text-[var(--fg)]">Recording</h2>
+          {recordStatus && !recordStatus.available && (
+            <p className="text-[11px] text-[var(--danger)]">{recordStatus.reason}</p>
+          )}
           <Field label="Frame rate">
             <Segmented
               fullWidth

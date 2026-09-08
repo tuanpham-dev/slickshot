@@ -338,6 +338,17 @@ export interface OcrEngineStatus {
 
 export const ocrEngineStatus = () => call<OcrEngineStatus>("ocr_engine_status");
 
+export interface RecordEngineStatus {
+  available: boolean;
+  /** Why recording is unavailable, or what it will use when it is. */
+  reason: string;
+}
+
+/** Whether recording can work here. Always true on macOS and Windows, whose
+ * media stacks ship with the OS; on Linux it depends on GStreamer and an
+ * H.264 encoder being installed. */
+export const recordEngineStatus = () => call<RecordEngineStatus>("record_engine_status");
+
 export const ocrListLangs = () => call<string[]>("ocr_list_langs");
 
 export const ocrDownloadLang = (isoCode: string) => call<string>("ocr_download_lang", { isoCode });

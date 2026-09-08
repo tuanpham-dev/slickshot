@@ -369,3 +369,128 @@ mod tests {
         }
     }
 }
+
+/// Decides which captured frames to keep to hit a target frame rate.
+///
+/// `xcap`'s Windows and Linux recorders hand over frames at whatever rate the
+/// compositor produces them, with no fps control of their own, so the pacing
+/// has to happen on our side. Shared by both backends and kept here because
+/// dropping the wrong frames is the kind of bug that only shows as "the video
+/// plays too fast", long after the recording is over.
+pub struct FramePacer {
+    interval_ms: f64,
+    /// When the next frame is due, in ms since the recording started.
+    next_due_ms: f64,
+}
+
+impl FramePacer {
+    pub fn new(fps: u32) -> Self {
+        Self {
+            interval_ms: 1000.0 / fps.max(1) as f64,
+            next_due_ms: 0.0,
+        }
+    }
+
+    /// Whether a frame captured `elapsed_ms` into the recording should be
+    /// written. Late frames do not accumulate a backlog: the schedule jumps
+    /// forward to the present rather than emitting a burst to catch up.
+    pub fn accept(&mut self, elapsed_ms: f64) -> bool {
+        if elapsed_ms + 1e-9 < self.next_due_ms {
+            return false;
+        }
+        self.next_due_ms += self.interval_ms;
+        if self.next_due_ms <= elapsed_ms {
+            self.next_due_ms = elapsed_ms + self.interval_ms;
+        }
+        true
+    }
+}
+
+/// Target H.264 bitrate for a capture, in bits per second.
+///
+/// Screen content is mostly flat colour and sharp text, which compresses far
+/// better than camera footage, so the usual bits-per-pixel rules of thumb are
+/// wasteful here. Clamped at both ends: a tiny region still needs enough
+/// bitrate for legible text, and a 4K capture should not run away.
+pub fn bitrate_for(width: u32, height: u32, fps: u32) -> u32 {
+    const MIN: f64 = 1_000_000.0;
+    const MAX: f64 = 40_000_000.0;
+    let pixels = (width as f64) * (height as f64);
+    let raw = pixels * (fps.max(1) as f64) * 0.1;
+    raw.clamp(MIN, MAX) as u32
+}
+
+/// Swaps the red and blue channels in place.
+///
+/// `RgbaImage` is RGBA; Media Foundation's `MFVideoFormat_RGB32` and most
+/// Windows surfaces are BGRA. The two are the same bytes in a different order,
+/// so this converts either way.
+pub fn swap_rb(buf: &mut [u8]) {
+    for px in buf.as_chunks_mut::<4>().0 {
+        px.swap(0, 2);
+    }
+}
+
+#[cfg(test)]
+mod pacing_tests {
+    use super::*;
+
+    #[test]
+    fn a_faster_source_is_thinned_to_the_target_rate() {
+        // 60fps of source frames, asked for 30: every other one.
+        let mut pacer = FramePacer::new(30);
+        let kept = (0..60)
+            .filter(|i| pacer.accept(*i as f64 * (1000.0 / 60.0)))
+            .count();
+        assert!((29..=31).contains(&kept), "expected about 30, got {kept}");
+    }
+
+    #[test]
+    fn a_slower_source_keeps_everything() {
+        // Nothing to drop when the compositor is already behind the target.
+        let mut pacer = FramePacer::new(60);
+        let kept = (0..20).filter(|i| pacer.accept(*i as f64 * 100.0)).count();
+        assert_eq!(kept, 20);
+    }
+
+    #[test]
+    fn a_long_stall_does_not_emit_a_burst_afterwards() {
+        // The bug this guards: after a 5s gap, a naive "next_due += interval"
+        // would accept the next 150 frames instantly to catch up, and the
+        // recording would play back with a lurch.
+        let mut pacer = FramePacer::new(30);
+        assert!(pacer.accept(0.0));
+        assert!(pacer.accept(5_000.0), "the frame after the stall is kept");
+        assert!(
+            !pacer.accept(5_001.0),
+            "but the one 1ms later is not -- no backlog"
+        );
+        assert!(pacer.accept(5_040.0), "and the schedule resumes from there");
+    }
+
+    #[test]
+    fn the_first_frame_is_always_kept() {
+        assert!(FramePacer::new(30).accept(0.0));
+    }
+
+    #[test]
+    fn bitrate_scales_with_pixels_and_rate_but_stays_bounded() {
+        let small = bitrate_for(320, 240, 30);
+        let big = bitrate_for(1920, 1080, 30);
+        assert!(big > small);
+        assert!(small >= 1_000_000, "a small region still needs legible text");
+        assert!(
+            bitrate_for(7680, 4320, 60) <= 40_000_000,
+            "a huge capture is capped"
+        );
+    }
+
+    #[test]
+    fn swapping_red_and_blue_is_its_own_inverse() {
+        let mut px = vec![10u8, 20, 30, 255, 40, 50, 60, 128];
+        swap_rb(&mut px);
+        assert_eq!(px, vec![30, 20, 10, 255, 60, 50, 40, 128]);
+        swap_rb(&mut px);
+        assert_eq!(px, vec![10, 20, 30, 255, 40, 50, 60, 128]);
+    }
+}

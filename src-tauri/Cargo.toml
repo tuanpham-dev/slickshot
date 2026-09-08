@@ -65,6 +65,13 @@ tauri-plugin-process = "2.3.1"
 [target.'cfg(target_os = "linux")'.dependencies]
 gtk = "0.18"
 x11rb = { version = "0.14", features = ["randr", "xtest"] }
+# Screen recording. A system library on the same footing as Tesseract, gated
+# behind a runtime availability check (`record_engine_status`) so a machine
+# without the plugins gets a notice rather than a broken button.
+gstreamer = "0.23"
+gstreamer-app = "0.23"
+gstreamer-video = "0.23"
+gstreamer-pbutils = "0.23"
 
 # Synthetic wheel events for scrolling capture (capture/input.rs), and the
 # Accessibility permission check that gates whether those events go anywhere.
@@ -76,10 +83,10 @@ core-foundation = "0.10"
 # `windows_subsystem = "windows"` (main.rs) otherwise leaves stdout/stderr
 # with nowhere to go.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Foundation", "Win32_Security", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_UI_Shell"] }
 # Native OCR via Windows.Media.Ocr (no external tesseract needed on Windows).
 # `windows` 0.61 is already in the tree via tauri/wry, so this reuses it.
-windows = { version = "0.61", features = ["Foundation", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_Com"] }
+windows = { version = "0.61", features = ["Foundation", "Globalization", "Graphics_Imaging", "Media_Ocr", "Storage_Streams", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_Media_MediaFoundation", "Win32_Graphics_Direct3D11", "Win32_Graphics_Dxgi_Common"] }
 
 
 # Dependencies do the heavy lifting (screen grabs, pixel shuffling), so keep

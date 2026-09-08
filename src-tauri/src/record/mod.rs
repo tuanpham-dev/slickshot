@@ -25,12 +25,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::geometry::PhysRect;
 
-#[cfg(target_os = "linux")]
-mod linux;
+// Compiled on every platform, not just their own: each carries pure logic --
+// the GStreamer pipeline description, the Media Foundation bitrate and format
+// choices -- that decides whether recording works on a machine none of us can
+// test from here. Keeping it compiled and unit-tested everywhere is the only
+// check those parts get without the hardware in hand.
+pub mod linux;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "windows")]
-mod windows;
+pub mod windows;
 
 /// What a recording should capture. `rect` is physical pixels in the global
 /// virtual-screen space, like every other rect crossing this app's IPC; the

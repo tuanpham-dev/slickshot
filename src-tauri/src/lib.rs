@@ -139,6 +139,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             video::video_copy_file,
             video::video_upload,
             video::video_upload_supported,
+            video::record_engine_status,
             video::video_export_prepare,
             video::video_export,
             scroll::scroll_start,

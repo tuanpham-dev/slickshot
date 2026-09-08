@@ -43,7 +43,9 @@ jobs:
             build-essential \
             libpipewire-0.3-dev \
             libclang-dev \
-            libgbm-dev
+            libgbm-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev
 
       - uses: pnpm/action-setup@v4
 
@@ -178,6 +180,8 @@ jobs:
             libpipewire-0.3-dev \
             libclang-dev \
             libgbm-dev \
+            libgstreamer1.0-dev \
+            libgstreamer-plugins-base1.0-dev \
             xdg-utils
 
       - uses: pnpm/action-setup@v4
