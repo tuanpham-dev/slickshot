@@ -19,6 +19,7 @@ import {
   videoDiscard,
   videoProbe,
   videoReveal,
+  isMac,
   videoThumbnails,
   videoUrl,
   type VideoInfo,
@@ -434,9 +435,9 @@ export function VideoEditor({ params }: VideoEditorProps) {
         {info.has_audio && format === "gif" && (
           <span className="text-[11px] text-[var(--fg-muted)]">GIFs have no sound.</span>
         )}
-        {info.has_audio && format === "mp4" && effects.length > 0 && (
+        {info.has_audio && format === "mp4" && effects.length > 0 && !isMac && (
           <span className="text-[11px] text-[var(--fg-muted)]">
-            Audio is dropped when the timeline is edited.
+            Audio is dropped when the timeline is edited on this platform.
           </span>
         )}
       </div>

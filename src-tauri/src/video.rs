@@ -23,7 +23,7 @@ use tauri::{
 use crate::commands::{CommandError, CommandResult};
 use crate::geometry::PhysRect;
 use crate::record::transform::{self, Censor};
-use crate::record::{TimeRange, TranscodeOptions, VideoInfo};
+use crate::record::{PlanSegment, TimeRange, TranscodeOptions, VideoInfo};
 
 const LABEL: &str = "video-editor";
 /// Chunk ceiling for a ranged response. A `<video>` asking for "the rest of
@@ -207,20 +207,6 @@ pub enum VideoDest {
     Path { path: String },
     /// The configured save folder, named like a screenshot quicksave.
     Quicksave,
-}
-
-/// One stretch of the source that plays at a constant rate, and where it
-/// lands in the output. Built by the editor (`timelinePlan.ts`) so the
-/// piecewise arithmetic has one implementation rather than two; this side
-/// only looks moments up in it.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct PlanSegment {
-    pub src_start_ms: f64,
-    pub src_end_ms: f64,
-    pub out_start_ms: f64,
-    pub out_end_ms: f64,
-    /// 0 for a freeze: no source span, positive output span.
-    pub rate: f64,
 }
 
 /// A punch-in over a stretch of the clip.
@@ -595,25 +581,16 @@ fn run_export(
             // would leave the sound running past the picture. So audio rides
             // along only for the plain single-speed case, and the editor says
             // so before you export.
-            let uniform = req.plan.is_empty();
-            // The shim ends the output timeline at `trim_duration / speed`,
-            // so with a piecewise plan -- where a cut makes the output
-            // *shorter* than that -- it would hold the closing frame to pad
-            // the difference. Handing it the ratio the plan actually produces
-            // keeps that calculation right. Audio is off in this case anyway,
-            // which is the parameter's only other use.
-            let out_ms = req.out_duration_ms().max(1) as f32;
-            let effective_speed = if uniform {
-                req.speed
-            } else {
-                (req.range.duration_ms().max(1) as f32) / out_ms
-            };
             let opts = TranscodeOptions {
                 range: req.range,
-                speed: effective_speed,
+                speed: req.speed,
                 crop: req.crop,
                 output: req.output_size,
-                keep_audio: req.keep_audio && uniform,
+                keep_audio: req.keep_audio,
+                // Carries the timeline so the audio is composed segment by
+                // segment rather than stretched by one rate: a cut removes
+                // its sound with it, a freeze plays silence for the hold.
+                plan: req.plan.clone(),
             };
             let mut last_report = 0u64;
             backend

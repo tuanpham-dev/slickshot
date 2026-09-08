@@ -897,6 +897,8 @@ static AVAssetReader *tas_build_audio_reader(AVURLAsset *asset,
                                              double start_s,
                                              double end_s,
                                              double speed,
+                                             const double *plan,
+                                             uint32_t plan_count,
                                              AVAssetReaderAudioMixOutput **out_output) {
     NSArray<AVAssetTrack *> *audioTracks = [asset tracksWithMediaType:AVMediaTypeAudio];
     if (audioTracks.count == 0) {
@@ -904,16 +906,63 @@ static AVAssetReader *tas_build_audio_reader(AVURLAsset *asset,
     }
 
     AVMutableComposition *composition = [AVMutableComposition composition];
-    CMTimeRange range = CMTimeRangeMake(CMTimeMakeWithSeconds(start_s, 600),
-                                        CMTimeMakeWithSeconds(end_s - start_s, 600));
     NSMutableArray<AVAssetTrack *> *composed = [NSMutableArray array];
+
     for (AVAssetTrack *track in audioTracks) {
         AVMutableCompositionTrack *dest =
             [composition addMutableTrackWithMediaType:AVMediaTypeAudio
                                      preferredTrackID:kCMPersistentTrackID_Invalid];
-        NSError *error = nil;
-        if (![dest insertTimeRange:range ofTrack:track atTime:kCMTimeZero error:&error]) {
+        if (!dest) {
             continue;
+        }
+
+        if (plan_count == 0) {
+            // The plain case: the whole trim, stretched by one rate.
+            CMTimeRange range = CMTimeRangeMake(CMTimeMakeWithSeconds(start_s, 600),
+                                                CMTimeMakeWithSeconds(end_s - start_s, 600));
+            NSError *error = nil;
+            if (![dest insertTimeRange:range ofTrack:track atTime:kCMTimeZero error:&error]) {
+                continue;
+            }
+        } else {
+            // A piecewise timeline: each playing segment is inserted at the
+            // running end of the track and then scaled to the output span it
+            // is supposed to occupy. Building it sequentially rather than at
+            // each segment's own output time matters -- an insert places the
+            // *unscaled* source range, so a later segment placed by absolute
+            // time would land inside the one before it until that one shrank.
+            //
+            // A cut segment is simply never inserted, and a freeze leaves a
+            // gap, which a composition plays as silence. There is no audio for
+            // a frozen frame to hold.
+            CMTime cursor = kCMTimeZero;
+            for (uint32_t i = 0; i < plan_count; i++) {
+                const double *seg = plan + (size_t)i * 5;
+                double src_start = seg[0], src_end = seg[1];
+                double out_start = seg[2], out_end = seg[3];
+                double rate = seg[4];
+                double out_len = out_end - out_start;
+                if (out_len <= 0) {
+                    continue;
+                }
+                if (rate <= 0 || src_end - src_start <= 0) {
+                    // Freeze: advance the timeline, insert nothing.
+                    cursor = CMTimeAdd(cursor, CMTimeMakeWithSeconds(out_len, 600));
+                    continue;
+                }
+                CMTimeRange range =
+                    CMTimeRangeMake(CMTimeMakeWithSeconds(src_start, 600),
+                                    CMTimeMakeWithSeconds(src_end - src_start, 600));
+                NSError *error = nil;
+                if (![dest insertTimeRange:range ofTrack:track atTime:cursor error:&error]) {
+                    continue;
+                }
+                CMTimeRange placed =
+                    CMTimeRangeMake(cursor, CMTimeMakeWithSeconds(src_end - src_start, 600));
+                [dest scaleTimeRange:placed
+                          toDuration:CMTimeMakeWithSeconds(out_len, 600)];
+                cursor = CMTimeAdd(cursor, CMTimeMakeWithSeconds(out_len, 600));
+            }
         }
         [composed addObject:dest];
     }
@@ -924,7 +973,7 @@ static AVAssetReader *tas_build_audio_reader(AVURLAsset *asset,
     // Time-stretch rather than resample: scaleTimeRange pitch-corrects through
     // the audio mix's algorithm, so 2x playback still sounds like speech and
     // not like a chipmunk.
-    if (speed > 0 && fabs(speed - 1.0) > 1e-6) {
+    if (plan_count == 0 && speed > 0 && fabs(speed - 1.0) > 1e-6) {
         CMTimeRange whole = CMTimeRangeMake(kCMTimeZero, composition.duration);
         [composition scaleTimeRange:whole
                          toDuration:CMTimeMultiplyByFloat64(composition.duration, 1.0 / speed)];
@@ -984,6 +1033,8 @@ int tas_video_transcode(const char *src,
                         uint32_t out_w,
                         uint32_t out_h,
                         bool keep_audio,
+                        const double *plan,
+                        uint32_t plan_count,
                         void *ctx,
                         bool (*process)(void *ctx,
                                         const uint8_t *bgra_in,
@@ -1022,7 +1073,8 @@ int tas_video_transcode(const char *src,
 
         AVAssetReaderAudioMixOutput *audioOut = nil;
         AVAssetReader *audioReader =
-            keep_audio ? tas_build_audio_reader(asset, clamped_start, clamped_end, speed, &audioOut)
+            keep_audio ? tas_build_audio_reader(asset, clamped_start, clamped_end, speed, plan,
+                                               plan_count, &audioOut)
                        : nil;
 
         NSError *error = nil;
@@ -1117,6 +1169,19 @@ int tas_video_transcode(const char *src,
         // static screen gave a 1.19s clip. `endSessionAtSourceTime` below
         // fixes the end exactly, holding the last frame to fill the gap.
         double expected_out = (clamped_end - clamped_start) / (speed > 0 ? speed : 1.0);
+        if (plan_count > 0) {
+            // A piecewise timeline is shorter or longer than the trim divided
+            // by any single rate -- a cut removes time, a freeze adds it -- so
+            // the end comes from the plan itself.
+            double furthest = 0;
+            for (uint32_t i = 0; i < plan_count; i++) {
+                double out_end = plan[(size_t)i * 5 + 3];
+                if (out_end > furthest) {
+                    furthest = out_end;
+                }
+            }
+            expected_out = furthest;
+        }
 
         dispatch_semaphore_t done = dispatch_semaphore_create(0);
         dispatch_queue_t videoQueue =

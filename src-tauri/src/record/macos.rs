@@ -60,6 +60,8 @@ extern "C" {
         out_w: u32,
         out_h: u32,
         keep_audio: bool,
+        plan: *const f64,
+        plan_count: u32,
         ctx: *mut c_void,
         process: extern "C" fn(*mut c_void, *const u8, u32, u32, u32, *mut u8, *mut f64) -> bool,
         err_out: *mut *mut c_char,
@@ -299,6 +301,22 @@ impl VideoBackend for MacBackend {
             out_h,
             panicked: false,
         };
+        // Flattened as five doubles a segment, in seconds: the C side wants a
+        // plain array and this keeps the marshalling in one obvious place.
+        let flat: Vec<f64> = opts
+            .plan
+            .iter()
+            .flat_map(|seg| {
+                [
+                    seg.src_start_ms / 1000.0,
+                    seg.src_end_ms / 1000.0,
+                    seg.out_start_ms / 1000.0,
+                    seg.out_end_ms / 1000.0,
+                    seg.rate,
+                ]
+            })
+            .collect();
+
         let mut err: *mut c_char = std::ptr::null_mut();
         let rc = unsafe {
             tas_video_transcode(
@@ -310,6 +328,8 @@ impl VideoBackend for MacBackend {
                 out_w,
                 out_h,
                 opts.keep_audio,
+                flat.as_ptr(),
+                opts.plan.len() as u32,
                 &mut state as *mut TranscodeCtx as *mut c_void,
                 transcode_trampoline,
                 &mut err,
@@ -768,6 +788,7 @@ mod live_tests {
             crop: None,
             output: (before.width, before.height),
             keep_audio: true,
+            plan: Vec::new(),
         };
         let mut passed = 0;
         backend
@@ -882,6 +903,7 @@ mod live_tests {
             crop: Some(crop),
             output: out_size,
             keep_audio: false,
+            plan: Vec::new(),
         };
         let mut out_pts: Vec<u64> = Vec::new();
         backend
@@ -992,7 +1014,8 @@ mod live_tests {
                 monitor_id,
                 fps: 30,
                 show_cursor: true,
-                system_audio: false,
+                // Needed for the audio assertion below to mean anything.
+                system_audio: true,
                 microphone: false,
                 out_path: src_path,
             })
@@ -1000,7 +1023,11 @@ mod live_tests {
         std::thread::sleep(Duration::from_secs(8));
         let src = recording.stop().expect("stop");
         let before = backend.probe(&src).expect("probe");
-        println!("source: {}ms", before.duration_ms);
+        println!("source: {}ms audio={}", before.duration_ms, before.has_audio);
+        assert!(
+            before.has_audio,
+            "play something audible while this runs -- the point is the audio"
+        );
 
         // Trim 0-8s; cut 2-4s; play 5-7s at 2x. Output should be
         // 2 + 1 (5-7 at 2x) + 1 (4-5) + 1 (7-8) = 6s.
@@ -1008,14 +1035,47 @@ mod live_tests {
             start_ms: 0,
             end_ms: 8_000,
         };
-        let out_ms = 6_000f32;
+        let out_ms = 5_000f32;
+        // The same plan the callback below applies, so the shim can build the
+        // audio to match instead of stretching it by one rate.
+        let plan = vec![
+            crate::record::PlanSegment {
+                src_start_ms: 0.0,
+                src_end_ms: 2_000.0,
+                out_start_ms: 0.0,
+                out_end_ms: 2_000.0,
+                rate: 1.0,
+            },
+            crate::record::PlanSegment {
+                src_start_ms: 4_000.0,
+                src_end_ms: 5_000.0,
+                out_start_ms: 2_000.0,
+                out_end_ms: 3_000.0,
+                rate: 1.0,
+            },
+            crate::record::PlanSegment {
+                src_start_ms: 5_000.0,
+                src_end_ms: 7_000.0,
+                out_start_ms: 3_000.0,
+                out_end_ms: 4_000.0,
+                rate: 2.0,
+            },
+            crate::record::PlanSegment {
+                src_start_ms: 7_000.0,
+                src_end_ms: 8_000.0,
+                out_start_ms: 4_000.0,
+                out_end_ms: 5_000.0,
+                rate: 1.0,
+            },
+        ];
+        let _ = out_ms;
         let opts = TranscodeOptions {
             range,
-            // The ratio the plan produces, which is what `run_export` passes.
-            speed: (range.duration_ms() as f32) / out_ms,
+            speed: 1.0,
             crop: None,
             output: (before.width, before.height),
-            keep_audio: false,
+            keep_audio: true,
+            plan,
         };
 
         let map = |src_ms: f64| -> Option<f64> {
@@ -1045,9 +1105,13 @@ mod live_tests {
 
         let after = backend.probe(&dst).expect("probe out");
         println!("output: {}ms from {kept} frames", after.duration_ms);
+        assert_eq!(
+            after.has_audio, before.has_audio,
+            "a cut should take its own sound with it, not the whole track"
+        );
         assert!(
-            (5_800..=6_200).contains(&after.duration_ms),
-            "the plan says 6000ms; got {}ms -- a cut padded back out to the \
+            (4_800..=5_200).contains(&after.duration_ms),
+            "the plan says 5000ms; got {}ms -- a cut padded back out to the \
              trim's length is what this is here to catch",
             after.duration_ms
         );

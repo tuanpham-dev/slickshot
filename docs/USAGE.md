@@ -58,9 +58,25 @@ seeking in a long clip is immediate.
 handle to trim. The excluded ranges dim, and the duration under the clip shows
 what the export will actually be — including the speed change.
 
-**Speed** is 0.5x to 4x, applied to both preview and export. On macOS the audio
-is time-stretched with pitch correction, so a 2x clip still sounds like speech;
-the other platforms export silent video at any speed but 1x.
+**Speed** is 0.5x to 4x for the whole clip. For part of it, add a speed clip to
+the timeline instead — a range's own rate wins over the global one, so what the
+clip says is what you get.
+
+**Timeline effects** are clips on lanes under the scrubber: **cut** removes a
+stretch and pulls everything after it earlier, **freeze** holds one moment
+still, **speed** changes the rate of a range, and **zoom** punches in. Drag a
+clip to move it or its edges to resize; clips that do not overlap in time share
+a lane. Cut stretches are hatched on the scrubber, and playback skips them, so
+what you preview is what exports.
+
+On macOS the audio is rebuilt to match — composed segment by segment, so a cut
+takes its own sound with it and a freeze plays silence, with pitch correction
+so a 2x range still sounds like speech. Windows and Linux export silent video
+whenever the timeline is edited.
+
+**Time-ranged annotations:** select any annotation and press "Limit to a time
+range" to have it appear only for part of the clip; an amber bar under the trim
+sets when.
 
 **The tools** are the image editor's, minus the ones that read pixels from a
 still frame (eyedropper, extract text, loupe, measure) — those have no meaning

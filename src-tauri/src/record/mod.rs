@@ -94,6 +94,21 @@ pub struct RgbaFrame {
     pub pts_ms: u64,
 }
 
+/// One stretch of the source that plays at a constant rate, and where it
+/// lands in the output. Built by the editor so the piecewise arithmetic has
+/// one implementation; the backends only look moments up in it.
+///
+/// A freeze is a segment with no source span and a positive output span --
+/// one moment stretched over output time.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PlanSegment {
+    pub src_start_ms: f64,
+    pub src_end_ms: f64,
+    pub out_start_ms: f64,
+    pub out_end_ms: f64,
+    pub rate: f64,
+}
+
 #[derive(Debug, Clone)]
 pub struct TranscodeOptions {
     pub range: TimeRange,
@@ -104,6 +119,9 @@ pub struct TranscodeOptions {
     /// Final pixel size after crop.
     pub output: (u32, u32),
     pub keep_audio: bool,
+    /// The timeline's source-to-output map. Empty means the whole range at
+    /// `speed`, which is the plain case.
+    pub plan: Vec<PlanSegment>,
 }
 
 #[derive(Debug, thiserror::Error)]
