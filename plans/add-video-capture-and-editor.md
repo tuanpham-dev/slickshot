@@ -275,7 +275,10 @@ Add screen recording (region / window / monitor / full screen) that writes MP4 i
 
 ### Phase 6: Documentation, site, and verification sweep
 **Goal:** Every user-facing surface documents recording, and the full test/lint matrix is green.
-**Checkpoint:** `pnpm test`, `npx tsc --noEmit`, `cargo test`, `cargo clippy --all-targets`, `cargo fmt --check` all clean; `git diff --stat` touches no file outside "Files to Change" without a note in the plan.
+**Checkpoint:** `pnpm test`, `npx tsc --noEmit`, `cargo test`, `cargo clippy --all-targets` all clean;
+
+> **`cargo fmt --check` cannot be part of this gate as written.** It reports diffs in 35 files across the whole crate, most of them untouched by this plan (`face.rs`, `tray.rs`, `translate.rs`, `update.rs` and so on) -- the repository has never been rustfmt-formatted and does not follow its default style. Running `cargo fmt` to satisfy the checkpoint would bury this feature under a whole-codebase reformat. T6.2 should either drop it or land the reformat as its own separate commit, first, with nothing else in it. Decide before starting Phase 6.
+ `git diff --stat` touches no file outside "Files to Change" without a note in the plan.
 
 - [ ] **T6.1 -- Docs and landing page**
   - Files: `README.md`, `docs/USAGE.md`, `docs/CLI.md`, `docs/ARCHITECTURE.md`, `docs/BUILDING.md`, `docs/TESTING.md`, `site/index.html`
