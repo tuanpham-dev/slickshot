@@ -48,6 +48,13 @@ interface CanvasProps {
   /** Word boxes for the current image, or null while they are still being
    * fetched -- a drag during that window stays freeform rather than waiting. */
   textBoxes?: OcrWordBox[] | null;
+  /** Hides the base canvas without unmounting it. The Video Editor draws the
+   * paused frame there so tools that read pixels still work, but shows the
+   * live `<video>` underneath instead of a frozen picture of it. */
+  hideBase?: boolean;
+  /** Rendered behind both canvases at exactly the image's size and zoom --
+   * the Video Editor's `<video>` element. */
+  underlay?: React.ReactNode;
 }
 
 interface DragState {
@@ -95,6 +102,8 @@ export function Canvas({
   onConfirmCrop,
   snapToText = false,
   textBoxes = null,
+  hideBase = false,
+  underlay,
 }: CanvasProps) {
   const baseCanvasRef = useRef<HTMLCanvasElement>(null);
   const annCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -610,10 +619,16 @@ export function Canvas({
         overflow: backdrop.enabled ? "hidden" : undefined,
       }}
     >
+      {underlay && <div className="absolute inset-0 w-full h-full">{underlay}</div>}
       <canvas
         ref={baseCanvasRef}
         className="absolute inset-0 w-full h-full"
-        style={{ imageRendering: zoom > 1 ? "pixelated" : "auto" }}
+        style={{
+          imageRendering: zoom > 1 ? "pixelated" : "auto",
+          // Hidden rather than unmounted: the frame it holds is still what
+          // the sampling tools read.
+          visibility: hideBase ? "hidden" : undefined,
+        }}
       />
       <canvas
         ref={annCanvasRef}

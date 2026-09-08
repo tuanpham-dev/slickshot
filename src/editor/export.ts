@@ -12,6 +12,11 @@ export interface FlattenOptions {
    * dimensions. Applied before the backdrop, so the number the user typed is
    * the size of the *picture* and any frame is added around it. */
   target?: { w: number; h: number } | null;
+  /** Renders the annotations alone on a transparent canvas, with no base
+   * image and no crop applied. The Video Editor needs this: its annotations
+   * are composited onto every frame by the backend, so baking one frame of
+   * video into the overlay would freeze that frame under every mark. */
+  transparent?: boolean;
 }
 
 function resizeCanvas(source: HTMLCanvasElement, w: number, h: number): HTMLCanvasElement {
@@ -39,7 +44,7 @@ export async function flattenToPng(
   shapes: Shape[],
   opts: FlattenOptions = {},
 ): Promise<Uint8Array> {
-  const { cropRect = null, backdrop = null, target = null } = opts;
+  const { cropRect = null, backdrop = null, target = null, transparent = false } = opts;
 
   await preloadImageShapes(shapes);
 
@@ -47,6 +52,16 @@ export async function flattenToPng(
   annotations.width = baseCanvas.width;
   annotations.height = baseCanvas.height;
   render(annotations.getContext("2d")!, shapes, { baseImage: baseCanvas });
+
+  // The overlay travels at the source's full size and is cropped on the Rust
+  // side alongside the frame, so cropping here as well would apply it twice.
+  if (transparent) {
+    const blob = await new Promise<Blob | null>((resolve) =>
+      annotations.toBlob(resolve, "image/png"),
+    );
+    if (!blob) throw new Error("Failed to encode PNG");
+    return new Uint8Array(await blob.arrayBuffer());
+  }
 
   const width = cropRect ? Math.round(cropRect.w) : baseCanvas.width;
   const height = cropRect ? Math.round(cropRect.h) : baseCanvas.height;

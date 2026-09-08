@@ -13,13 +13,12 @@ import {
   type VideoExportRequest,
 } from "../lib/ipc";
 
-/** No overlay to burn in yet -- annotations land in Phase 4. The raw body is
- * still what `video_export` expects, so an empty one says "nothing on top". */
-const NO_OVERLAY = new Uint8Array(0);
-
 export interface VideoExportBarProps {
   /** Everything but the destination, which each button supplies. */
   request: Omit<VideoExportRequest, "dest">;
+  /** Flattens the annotations to a transparent PNG at the clip's own size.
+   * An empty array means there is nothing to burn in. */
+  buildOverlay: () => Promise<Uint8Array>;
   onDiscard: () => void;
   onReveal: () => void;
 }
@@ -29,7 +28,7 @@ export interface VideoExportBarProps {
  *
  * Deliberately mirrors the image editor's export row: the same verbs in the
  * same order, so the two editors do not have to be learned separately. */
-export function VideoExportBar({ request, onDiscard, onReveal }: VideoExportBarProps) {
+export function VideoExportBar({ request, buildOverlay, onDiscard, onReveal }: VideoExportBarProps) {
   const toast = useToast();
   const [busy, setBusy] = useState<string | null>(null);
   const [progress, setProgress] = useState<number | null>(null);
@@ -77,21 +76,21 @@ export function VideoExportBar({ request, onDiscard, onReveal }: VideoExportBarP
       // A cancelled dialog is not a failure -- just nothing to do.
       if (!path) return;
       await videoExportPrepare({ ...request, dest: { kind: "path", path } });
-      const { saved_path } = await videoExport(NO_OVERLAY);
+      const { saved_path } = await videoExport(await buildOverlay());
       toast.show({ kind: "success", title: "Saved", description: saved_path });
     });
 
   const handleQuickSave = () =>
     run("Quick save", async () => {
       await videoExportPrepare({ ...request, dest: { kind: "quicksave" } });
-      const { saved_path } = await videoExport(NO_OVERLAY);
+      const { saved_path } = await videoExport(await buildOverlay());
       toast.show({ kind: "success", title: "Saved", description: saved_path });
     });
 
   const handleCopyFile = () =>
     run("Copy file", async () => {
       await videoExportPrepare({ ...request, dest: { kind: "quicksave" } });
-      await videoCopyFile();
+      await videoCopyFile(await buildOverlay());
       toast.show({
         kind: "success",
         title: "Copied",
@@ -102,7 +101,7 @@ export function VideoExportBar({ request, onDiscard, onReveal }: VideoExportBarP
   const handleUpload = () =>
     run("Upload", async () => {
       await videoExportPrepare({ ...request, format: "mp4", dest: { kind: "quicksave" } });
-      const result = await videoUpload();
+      const result = await videoUpload(await buildOverlay());
       await navigator.clipboard.writeText(result.url).catch(() => {});
       toast.show({
         kind: "success",

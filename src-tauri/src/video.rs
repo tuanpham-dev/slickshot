@@ -324,25 +324,62 @@ pub async fn video_export(
     })
 }
 
-/// The actual pixel work, shared by both output formats: crop, resize, censor,
-/// then the annotation overlay last so nothing is drawn over it.
-fn process_frame(
-    frame: &mut RgbaImage,
-    req: &VideoExportRequest,
-    overlay: Option<&RgbaImage>,
-) {
-    if let Some(crop) = req.crop {
+/// The crop-relative form of everything the export applies per frame.
+///
+/// The editor works in the *source* clip's coordinates -- a censor at (100,
+/// 100) means 100px into the recording, and the overlay PNG is drawn at the
+/// recording's own size. Shifting the censors and cropping the overlay to
+/// match is done once here rather than per frame.
+struct Prepared {
+    censors: Vec<Censor>,
+    overlay: Option<RgbaImage>,
+    output: (u32, u32),
+}
+
+impl Prepared {
+    fn new(req: &VideoExportRequest, overlay: Option<&RgbaImage>) -> Self {
+        let (dx, dy) = req.crop.map(|c| (c.x, c.y)).unwrap_or((0, 0));
+        let censors = req
+            .censors
+            .iter()
+            .map(|c| Censor {
+                rect: PhysRect::new(c.rect.x - dx, c.rect.y - dy, c.rect.w, c.rect.h),
+                mode: c.mode,
+            })
+            .collect();
+        let overlay = overlay.map(|o| match req.crop {
+            Some(crop) => transform::crop(o, crop),
+            None => o.clone(),
+        });
+        Self {
+            censors,
+            overlay,
+            output: req.output_size,
+        }
+    }
+}
+
+/// The actual pixel work, shared by both output formats.
+///
+/// Order matters and is not the obvious one. Everything happens at the
+/// source's resolution and the resize comes *last*, so the coordinates the
+/// editor sent need no scaling to be meaningful. The annotation overlay goes
+/// on after the censors: an arrow blacked out by a censor drawn beneath it is
+/// never what someone meant, whereas a censor still covers every pixel of
+/// video the overlay leaves clear.
+fn process_frame(frame: &mut RgbaImage, prepared: &Prepared, crop: Option<PhysRect>) {
+    if let Some(crop) = crop {
         *frame = transform::crop(frame, crop);
     }
-    let (w, h) = req.output_size;
+    if !prepared.censors.is_empty() {
+        transform::apply_censors(frame, &prepared.censors);
+    }
+    if let Some(overlay) = &prepared.overlay {
+        transform::composite_overlay(frame, overlay);
+    }
+    let (w, h) = prepared.output;
     if frame.dimensions() != (w, h) {
         *frame = transform::resize(frame, w, h);
-    }
-    if !req.censors.is_empty() {
-        transform::apply_censors(frame, &req.censors);
-    }
-    if let Some(overlay) = overlay {
-        transform::composite_overlay(frame, overlay);
     }
 }
 
@@ -355,6 +392,7 @@ fn run_export(
 ) -> CommandResult<PathBuf> {
     let backend = crate::record::default_backend();
     let total_ms = req.range.duration_ms().max(1);
+    let prepared = Prepared::new(req, overlay);
 
     match req.format {
         VideoFormat::Mp4 => {
@@ -372,7 +410,7 @@ fn run_export(
             let mut last_report = 0u64;
             backend
                 .transcode(src, dest, &opts, &mut |mut frame| {
-                    process_frame(&mut frame.image, req, overlay);
+                    process_frame(&mut frame.image, &prepared, req.crop);
                     let elapsed = frame.pts_ms;
                     frame.pts_ms = (frame.pts_ms as f64 / speed) as u64;
                     // Throttled: a 30fps export would otherwise emit an event
@@ -394,6 +432,17 @@ fn run_export(
         VideoFormat::Gif => {
             let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
             let fps = req.gif_fps.unwrap_or(settings.gif_fps).clamp(1, 50);
+            // A GIF at a screen recording's native width is enormous and no
+            // one views it at 1:1 anyway, so it is capped -- keeping the
+            // aspect ratio, and never upscaling a clip that is already small.
+            let max_w = settings.gif_max_width.max(64);
+            let (out_w, out_h) = prepared.output;
+            let gif_size = if out_w > max_w {
+                let scaled_h = ((out_h as f64) * (max_w as f64) / (out_w as f64)).round() as u32;
+                (max_w, scaled_h.max(1))
+            } else {
+                (out_w, out_h)
+            };
             // Decoding at the *output* rate already applies the speed change:
             // asking for `fps * speed` source frames per second and then
             // playing them back at `fps` is what makes the clip faster.
@@ -403,7 +452,10 @@ fn run_export(
             let mut last_report = 0u64;
             backend
                 .decode_frames(src, req.range, src_fps, &mut |mut frame| {
-                    process_frame(&mut frame.image, req, overlay);
+                    process_frame(&mut frame.image, &prepared, req.crop);
+                    if frame.image.dimensions() != gif_size {
+                        frame.image = transform::resize(&frame.image, gif_size.0, gif_size.1);
+                    }
                     frames.push(frame.image);
                     let elapsed = frame.pts_ms.saturating_sub(req.range.start_ms);
                     if elapsed.saturating_sub(last_report) >= 250 {
@@ -485,7 +537,30 @@ pub fn video_upload_supported(app: AppHandle) -> bool {
 /// Separate from `video_export` because the file never belongs anywhere on
 /// disk: it is built, sent, and deleted.
 #[tauri::command]
-pub async fn video_upload(app: AppHandle) -> CommandResult<crate::upload::UploadResult> {
+pub async fn video_upload(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> CommandResult<crate::upload::UploadResult> {
+    // Carries the annotation overlay like `video_export` does -- without it,
+    // uploading silently dropped every annotation the user had drawn.
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(_) => {
+            return Err(CommandError::Image(
+                "video_upload expects a raw binary body, not JSON".into(),
+            ))
+        }
+    };
+    let overlay = if bytes.is_empty() {
+        None
+    } else {
+        Some(
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+                .map_err(|e| CommandError::Image(e.to_string()))?
+                .to_rgba8(),
+        )
+    };
+
     let req = app
         .state::<PendingVideoExport>()
         .0
@@ -503,7 +578,7 @@ pub async fn video_upload(app: AppHandle) -> CommandResult<crate::upload::Upload
     let worker_app = app.clone();
     let worker_temp = temp.clone();
     let built = tauri::async_runtime::spawn_blocking(move || {
-        run_export(&worker_app, &src, &worker_temp, &req, None)
+        run_export(&worker_app, &src, &worker_temp, &req, overlay.as_ref())
     })
     .await
     .map_err(|e| CommandError::Image(e.to_string()))?;
@@ -543,7 +618,26 @@ fn is_untouched(req: &VideoExportRequest, info: &VideoInfo) -> bool {
 /// untrimmed, unmodified clip short-circuits to the file already on disk
 /// rather than re-encoding it for nothing.
 #[tauri::command]
-pub async fn video_copy_file(app: AppHandle) -> CommandResult<()> {
+pub async fn video_copy_file(
+    app: AppHandle,
+    request: tauri::ipc::Request<'_>,
+) -> CommandResult<()> {
+    // Carries the overlay for the same reason `video_export` does: a copied
+    // clip has to look like the one that would be saved.
+    let bytes = match request.body() {
+        tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
+        tauri::ipc::InvokeBody::Json(_) => Vec::new(),
+    };
+    let overlay = if bytes.is_empty() {
+        None
+    } else {
+        Some(
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
+                .map_err(|e| CommandError::Image(e.to_string()))?
+                .to_rgba8(),
+        )
+    };
+
     let req = app
         .state::<PendingVideoExport>()
         .0
@@ -560,7 +654,7 @@ pub async fn video_copy_file(app: AppHandle) -> CommandResult<()> {
     let info = crate::record::default_backend()
         .probe(&src)
         .map_err(|e| CommandError::Image(e.to_string()))?;
-    if is_untouched(&req, &info) {
+    if is_untouched(&req, &info) && overlay.is_none() {
         return crate::record::clipboard::copy_file(&src).map_err(CommandError::Image);
     }
 
@@ -583,7 +677,7 @@ pub async fn video_copy_file(app: AppHandle) -> CommandResult<()> {
     let worker_app = app.clone();
     let worker_dest = dest.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        run_export(&worker_app, &src, &worker_dest, &req, None)
+        run_export(&worker_app, &src, &worker_dest, &req, overlay.as_ref())
     })
     .await
     .map_err(|e| CommandError::Image(e.to_string()))??;
@@ -684,14 +778,15 @@ mod tests {
         let mut frame = RgbaImage::from_pixel(100, 80, image::Rgba([10, 20, 30, 255]));
         let mut req = request((20, 20));
         req.crop = Some(PhysRect::new(10, 10, 40, 40));
-        process_frame(&mut frame, &req, None);
+        process_frame(&mut frame, &Prepared::new(&req, None), req.crop);
         assert_eq!(frame.dimensions(), (20, 20), "the output size wins");
     }
 
     #[test]
     fn a_frame_with_no_crop_is_still_resized() {
         let mut frame = RgbaImage::from_pixel(64, 64, image::Rgba([1, 2, 3, 255]));
-        process_frame(&mut frame, &request((32, 16)), None);
+        let req = request((32, 16));
+        process_frame(&mut frame, &Prepared::new(&req, None), None);
         assert_eq!(frame.dimensions(), (32, 16));
     }
 
@@ -708,7 +803,7 @@ mod tests {
         let mut overlay = RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 0]));
         overlay.put_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
 
-        process_frame(&mut frame, &req, Some(&overlay));
+        process_frame(&mut frame, &Prepared::new(&req, Some(&overlay)), None);
         assert_eq!(
             frame.get_pixel(2, 2).0,
             [255, 0, 0, 255],
@@ -722,23 +817,71 @@ mod tests {
     }
 
     #[test]
-    fn censors_are_measured_against_the_output_not_the_source() {
-        // The crop is 40x40 of a 100x80 frame, scaled to 20x20; a censor at
-        // (0,0,10,10) must cover the output's top-left quarter.
-        let mut frame = RgbaImage::from_pixel(100, 80, image::Rgba([255, 255, 255, 255]));
-        let mut req = request((20, 20));
-        req.crop = Some(PhysRect::new(10, 10, 40, 40));
+    fn a_censor_lands_where_the_editor_drew_it_after_a_crop() {
+        // The editor works in source coordinates: a censor at (60,60) means
+        // 60px into the *recording*. With the crop starting at (50,50) it has
+        // to end up at (10,10) in the cropped frame -- getting this backwards
+        // puts every censor in the wrong place the moment someone crops.
+        let mut frame = RgbaImage::from_pixel(200, 200, image::Rgba([255, 255, 255, 255]));
+        let mut req = request((100, 100));
+        req.crop = Some(PhysRect::new(50, 50, 100, 100));
         req.censors = vec![Censor {
-            rect: PhysRect::new(0, 0, 10, 10),
+            rect: PhysRect::new(60, 60, 20, 20),
             mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
         }];
-        process_frame(&mut frame, &req, None);
-        assert_eq!(frame.get_pixel(5, 5).0, [0, 0, 0, 255], "inside the censor");
+        let prepared = Prepared::new(&req, None);
+        process_frame(&mut frame, &prepared, req.crop);
+
         assert_eq!(
             frame.get_pixel(15, 15).0,
-            [255, 255, 255, 255],
-            "outside it"
+            [0, 0, 0, 255],
+            "the censor should cover (10,10)-(30,30) of the cropped frame"
         );
+        assert_eq!(
+            frame.get_pixel(45, 45).0,
+            [255, 255, 255, 255],
+            "and nothing outside it"
+        );
+    }
+
+    #[test]
+    fn the_overlay_is_cropped_the_same_way_the_frame_is() {
+        // The overlay PNG is drawn at the source's size, so it has to be cut
+        // to the same window or every annotation slides by the crop origin.
+        let mut frame = RgbaImage::from_pixel(200, 200, image::Rgba([255, 255, 255, 255]));
+        let mut req = request((100, 100));
+        req.crop = Some(PhysRect::new(50, 50, 100, 100));
+
+        let mut overlay = RgbaImage::from_pixel(200, 200, image::Rgba([0, 0, 0, 0]));
+        overlay.put_pixel(120, 120, image::Rgba([255, 0, 0, 255]));
+
+        let prepared = Prepared::new(&req, Some(&overlay));
+        process_frame(&mut frame, &prepared, req.crop);
+        assert_eq!(
+            frame.get_pixel(70, 70).0,
+            [255, 0, 0, 255],
+            "a mark at (120,120) of the source belongs at (70,70) after a crop at (50,50)"
+        );
+    }
+
+    #[test]
+    fn the_resize_happens_after_everything_else() {
+        // Censor coordinates are the source's, so a half-size output must not
+        // make the editor's numbers mean something different.
+        let mut frame = RgbaImage::from_pixel(200, 200, image::Rgba([255, 255, 255, 255]));
+        let mut req = request((100, 100));
+        req.censors = vec![Censor {
+            rect: PhysRect::new(0, 0, 100, 100),
+            mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
+        }];
+        let prepared = Prepared::new(&req, None);
+        process_frame(&mut frame, &prepared, None);
+
+        assert_eq!(frame.dimensions(), (100, 100));
+        // The censored top-left quarter of the source is the top-left quarter
+        // of the output too.
+        assert_eq!(frame.get_pixel(20, 20).0, [0, 0, 0, 255]);
+        assert_eq!(frame.get_pixel(70, 70).0, [255, 255, 255, 255]);
     }
 
     #[test]

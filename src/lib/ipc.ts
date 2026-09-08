@@ -614,14 +614,28 @@ export async function videoExport(overlayPng: Uint8Array): Promise<VideoExportRe
   }
 }
 
-/** Copies the *prepared* export, so a trimmed clip copies as trimmed. Call
- * `videoExportPrepare` first, exactly as Save As does. */
-export const videoCopyFile = () => call<void>("video_copy_file");
+/** Copies the *prepared* export, so a trimmed, annotated clip copies as it
+ * would save. Call `videoExportPrepare` first, exactly as Save As does; the
+ * body is the overlay PNG. */
+export async function videoCopyFile(overlayPng: Uint8Array): Promise<void> {
+  try {
+    return await invoke<void>("video_copy_file", overlayPng);
+  } catch (err) {
+    throw new IpcError(err);
+  }
+}
 /** Whether the configured host accepts video. Imgur and imgbb are image-only,
  * so Upload is hidden rather than offered as a button that can only fail. */
 export const videoUploadSupported = () => call<boolean>("video_upload_supported");
-/** Exports the prepared trim to a temp MP4, uploads it, and deletes it. */
-export const videoUpload = () => call<UploadResult>("video_upload");
+/** Exports the prepared trim to a temp MP4, uploads it, and deletes it. The
+ * body is the overlay PNG, as with `videoExport`. */
+export async function videoUpload(overlayPng: Uint8Array): Promise<UploadResult> {
+  try {
+    return await invoke<UploadResult>("video_upload", overlayPng);
+  } catch (err) {
+    throw new IpcError(err);
+  }
+}
 
 export function onVideoExportProgress(
   cb: (p: { done: number; total: number }) => void,

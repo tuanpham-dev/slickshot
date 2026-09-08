@@ -221,35 +221,44 @@ Add screen recording (region / window / monitor / full screen) that writes MP4 i
 **Goal:** Every scope item from the "all the features" decision exports correctly through the shared Rust transform layer.
 **Checkpoint:** On a 10s 1600x1000 recording: crop to 800x500, speed 2x, resize to 50%, trim 1-9s, one red rectangle + one pixelate censor, export MP4 -> probe reports 400x250 and 3900-4100 ms, the rectangle is visible at the cropped position, the censored area is blocky in every frame (scrub through), and no audio track (speed != 1). Same settings as GIF at 15 fps -> a file under 20 MB that loops in a browser.
 
-- [ ] **T4.1 -- Crop and resize in the editor**
+> **Checkpoint met**, on a 1084x804 8s recording rather than the hypothetical 1600x1000: one pixelate censor + one red rectangle, speed 2x, Quick save -> `probe` reports **4037 ms** (half of 8s). A frame decoded out of the finished MP4 shows the censor blocky over three lines of text and the red rectangle burnt in at the position it was drawn. The same clip as GIF at 15 fps -> **2.2 MB**, well under 20 MB, with the loop block present.
+>
+> **Found while checking it:** censors did not *preview*. The `<video>` renders inside `Canvas`, which only mounts once a base image exists, so every effect that attached a listener to the element ran before it existed and never re-ran -- the frame grabs never armed, the base canvas stayed a 1x1 stand-in, and a censor sampling it drew a flat block. The export was correct throughout, which is exactly why this needed looking at rather than trusting. Fixed by tracking the element in state so those effects re-run when it mounts.
+
+- [x] **T4.1 -- Crop and resize in the editor**
   - Files: `src/video/VideoEditor.tsx`, `src/editor/Canvas.tsx`, `src/editor/PropertiesPanel.tsx`, `src/video/videoTools.ts`
   - Do: `Canvas.tsx` gains `hideBase?: boolean` (the base canvas still receives the paused frame for sampling tools but is `visibility: hidden` so the `<video>` shows through). The crop tool works unchanged (it edits `cropRect` in the store); `VideoEditor` does not bake the crop on confirm -- it keeps `cropRect` as the export crop and dims outside it, since baking would require re-encoding. The Resize field in `PropertiesPanel` (already there for images, driven by `resize`/`onResizeChange`) is reused; `videoTools.ts` exports `VIDEO_TOOLS: ToolId[]` (the whitelist from Approach) passed to `Toolbar`'s new `tools` prop, and `extractCensors(shapes) -> Censor[]` + `shapesForOverlay(shapes)` (everything except censors) with tests.
   - Depends on: T3.4
   - Done when: a crop + resize export produces the expected dimensions via `probe`; `videoTools.test.ts` covers censor extraction for the three censor modes.
+  - **As shipped (Diverged -- a separate toolbar).** `Canvas` gained `hideBase` and an `underlay` slot (the `<video>` renders behind the annotation layer at the same size and zoom), as planned. The tool row did *not* become a `tools` prop on `Toolbar`: that component carries a dozen required props for things a clip has no equivalent of (backdrop, adjustments, redact-PII, insert-image, pin), and making each optional to serve one caller would put the risk in the component the image editor depends on. `VideoToolbar.tsx` renders the `VIDEO_TOOLS` whitelist over the same store and the same `ToolId`s instead, so the tools behave identically. 16 tests in `videoTools.test.ts`.
+  - **Added -- fit to window.** A recording is its display's full pixel size, so the clip opened at 1:1 and overflowed the window; the first thing anyone had to do was scroll. Fits on load now, the same way `Editor.tsx` does.
 
-- [ ] **T4.2 -- Speed control**
+- [x] **T4.2 -- Speed control**
   - Files: `src/video/Timeline.tsx`, `src/video/VideoEditor.tsx`, `src-tauri/src/video.rs`, `src-tauri/src/record/transform.rs`
   - Do: a `Segmented` 0.5x / 1x / 1.5x / 2x / 4x next to the play button; preview sets `video.playbackRate`; export passes `speed`. In `video_export`, the transcode `process` closure uses `SpeedResampler` to rewrite each frame's PTS (and drop/duplicate frames); `keep_audio` is `true` on macOS and `speed == 1.0` elsewhere, and the export bar shows "Audio is removed at speeds other than 1x" only on Windows/Linux when `has_audio && speed != 1`.
   - Depends on: T4.1, T1.1
   - Done when: a 2x export halves the probed duration (+-100 ms); on macOS the clip keeps `has_audio: true` and the audio plays in sync at the faster rate.
 
-- [ ] **T4.3 -- Annotation overlay burn-in**
+- [x] **T4.3 -- Annotation overlay burn-in**
   - Files: `src/editor/export.ts`, `src/video/VideoEditor.tsx`, `src-tauri/src/video.rs`
   - Do: `flattenToPng` gets `transparent?: boolean` (skip the base image draw, keep the canvas cleared to transparent); the Video Editor flattens `shapesForOverlay(shapes)` at source resolution and sends the PNG as the raw request body of `video_export` (the JSON options travel in a preceding `video_export_prepare` command, mirroring `export_prepare`/`export_commit`). `video_export` decodes the PNG to `RgbaImage` once and the `process` closure runs `transform::crop` -> `composite_overlay` (overlay cropped identically) -> `apply_censors` (rects offset by the crop) -> `resize`.
   - Depends on: T4.1
   - Done when: exporting with a rectangle at (100,100) and crop starting at (50,50) shows the rectangle at (50,50) in the output's first frame (verified by `decode_frames` in a test-mode CLI flag, or by opening the frame in the image editor).
+  - **As shipped (Diverged -- overlay goes on last).** The plan's order was crop -> overlay -> censors -> resize. Shipped as crop -> censors -> **overlay** -> resize: an annotation blacked out by a censor drawn beneath it is never what anyone meant, while a censor still covers every pixel of video the overlay leaves clear. The important half of the plan's design was kept -- everything happens in the *source's* coordinates with the resize last, so the numbers the editor sends need no scaling. `Prepared` shifts the censors by the crop origin and crops the overlay identically, once, rather than per frame. Three tests pin the coordinate handling.
+  - **Added (a bug this surfaced).** `video_upload` and `video_copy_file` ran the export with no overlay, so uploading or copying an annotated clip silently dropped every annotation. Both now take the overlay as a raw body like `video_export` does.
 
-- [ ] **T4.4 -- Per-frame censor**
+- [x] **T4.4 -- Per-frame censor**
   - Files: `src-tauri/src/record/transform.rs`, `src-tauri/src/video.rs`
   - Do: implement `apply_censors` for `Pixelate { block }` (average each block), `Solid { rgb }`, `Blur { sigma }` (`image::imageops::blur` on the sub-image, clamped to sigma <= 12 to bound cost); censor rects are clamped to the frame. Wire into the T4.3 closure.
   - Depends on: T4.3
   - Done when: `cargo test record::transform::censor` passes (a pixelated 8x8 block becomes uniform; solid fill exact; blur reduces variance) and the phase checkpoint's censor scrub check holds.
 
-- [ ] **T4.5 -- GIF export**
+- [x] **T4.5 -- GIF export**
   - Files: `src-tauri/src/record/gif.rs`, `src-tauri/src/video.rs`, `src/video/VideoExportBar.tsx`, `src-tauri/src/recording.rs`
   - Do: `gif::encode(frames: impl Iterator<Item = RgbaFrame>, fps: u32, out: &mut impl Write)` using the `gif` crate: global palette from the first frame via `color_quant::NeuQuant` (sample factor 10), per-frame delay from consecutive PTS, frame differencing (only the changed bounding box is written, disposal Keep) to keep files small, `Repeat::Infinite`. `video_export` with `format: "gif"` runs `decode_frames` at `settings.gif_fps` over the trim range, applies the same transform closure, scales to `min(output width, settings.gif_max_width)` and streams into the encoder. The export bar's GIF choice shows fps and max-width fields prefilled from settings. `deliver_recording` with a CLI `-o *.gif` sink now transcodes instead of erroring.
   - Depends on: T4.3, T3.1
   - Done when: `cargo test record::gif` passes (a 10-frame synthetic sequence encodes to a GIF whose frame count and delays round-trip through the `gif` decoder), and the checkpoint's GIF loops in a browser.
+  - **Verified live**: an 8s clip exported at 15 fps gives a valid `GIF89a`, 108 frames, delay 7 hundredths (~14.3 fps -- 100/15 rounds to 7), `NETSCAPE2.0` loop block present, 2.2 MB. `gif_max_width` was initially not applied (the file came out at the clip's native 1000px); now capped with the aspect ratio kept and no upscaling -- a re-export lands at 720x576.
 
 ### Phase 5: Windows and Linux backends
 **Goal:** The same trait is implemented on both platforms with their native encoders, CI builds all three, Linux reports a missing GStreamer instead of failing silently, and both platforms have been run on real hardware by the user.
