@@ -100,6 +100,13 @@ export type PanelOverride = "adjust" | "backdrop" | null;
 
 interface ShapeBase {
   id: string;
+  /** When this element appears and disappears, in milliseconds from the start
+   * of the clip. Both optional and both absent by default, which means "the
+   * whole clip" -- so every shape drawn before time ranges existed, and every
+   * shape on a still image, stays valid without migration. Video only; the
+   * image editor ignores them. */
+  startMs?: number;
+  endMs?: number;
 }
 
 export interface RectShape extends ShapeBase {

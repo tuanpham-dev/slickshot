@@ -4,7 +4,12 @@ import { Canvas } from "../editor/Canvas";
 import { useEditorStore } from "../editor/store";
 import { flattenToPng } from "../editor/export";
 import { VideoToolbar } from "./VideoToolbar";
-import { extractCensors, shapesForOverlay } from "./videoTools";
+import {
+  extractCensors,
+  overlaySegments,
+  packOverlays,
+  visibleAt,
+} from "./videoTools";
 import { useToast } from "../ui/Toast";
 import {
   frontendMounted,
@@ -73,6 +78,8 @@ export function VideoEditor({ params }: VideoEditorProps) {
   const setCropRect = useEditorStore((s) => s.setCropRect);
   const resize = useEditorStore((s) => s.resize);
   const setImage = useEditorStore((s) => s.setImage);
+  const selectedId = useEditorStore((s) => s.selectedId);
+  const updateShape = useEditorStore((s) => s.updateShape);
   const setZoom = useEditorStore((s) => s.setZoom);
   const canvasAreaRef = useRef<HTMLDivElement>(null);
 
@@ -187,13 +194,14 @@ export function VideoEditor({ params }: VideoEditorProps) {
     const onSettled = () => {
       void grabFrame();
     };
-    video.addEventListener("seeked", onSettled);
-    video.addEventListener("pause", onSettled);
-    video.addEventListener("loadeddata", onSettled);
+    // `canplay` matters: on the first open `loadeddata` can fire before the
+    // decoder has a frame that `createImageBitmap` will accept, which left the
+    // base canvas a 1x1 stand-in -- and a censor sampling that drew a flat
+    // block instead of pixelating, until the first seek.
+    const events = ["loadeddata", "canplay", "seeked", "pause"] as const;
+    for (const name of events) video.addEventListener(name, onSettled);
     return () => {
-      video.removeEventListener("seeked", onSettled);
-      video.removeEventListener("pause", onSettled);
-      video.removeEventListener("loadeddata", onSettled);
+      for (const name of events) video.removeEventListener(name, onSettled);
     };
   }, [grabFrame, videoId, videoEl]);
 
@@ -262,6 +270,19 @@ export function VideoEditor({ params }: VideoEditorProps) {
 
   const outMs = outputDuration(trim, Number(speed));
 
+  const selected = shapes.find((sh) => sh.id === selectedId) ?? null;
+  // Only a shape that has actually been given bounds gets the bar; an
+  // untimed one shows the "Limit to a time range" button instead, so the
+  // timeline is not cluttered by every selection.
+  const isTimed =
+    selected !== null && (selected.startMs !== undefined || selected.endMs !== undefined);
+  const elementRange = isTimed
+    ? {
+        start: selected!.startMs ?? 0,
+        end: selected!.endMs ?? info.duration_ms,
+      }
+    : null;
+
   // The crop decides the export's natural size; an explicit Resize overrides
   // it. Both are even-rounded because H.264 refuses odd dimensions.
   const even = (n: number) => Math.max(2, Math.round(n) - (Math.round(n) % 2));
@@ -272,15 +293,36 @@ export function VideoEditor({ params }: VideoEditorProps) {
     ? [even(resize.w), even(resize.h)]
     : [even(cropped.w), even(cropped.h)];
 
-  /** Flattens the annotations alone, at the clip's full size. The backend
-   * crops it in step with each frame, so it must not be cropped here. */
+  /** Flattens the annotations at the clip's full size -- one image per
+   * stretch of the clip over which the visible set does not change. The
+   * backend crops each in step with the frames, so nothing is cropped here.
+   *
+   * With no time ranges set this is a single segment, and it is sent as a
+   * bare PNG rather than a bundle, which is exactly what the export path did
+   * before time ranges existed. */
   async function buildOverlay(): Promise<Uint8Array> {
-    const drawn = shapesForOverlay(shapes);
+    const segments = overlaySegments(shapes, info!.duration_ms);
+    const drawn = segments.filter((seg) => seg.shapes.length > 0);
     if (drawn.length === 0) return new Uint8Array(0);
-    const canvas = document.createElement("canvas");
-    canvas.width = info!.width;
-    canvas.height = info!.height;
-    return flattenToPng(canvas, drawn, { transparent: true });
+
+    const flatten = async (segShapes: typeof shapes) => {
+      const canvas = document.createElement("canvas");
+      canvas.width = info!.width;
+      canvas.height = info!.height;
+      return flattenToPng(canvas, segShapes, { transparent: true });
+    };
+
+    if (segments.length === 1) return flatten(segments[0].shapes);
+
+    const packed = [];
+    for (const seg of drawn) {
+      packed.push({
+        startMs: seg.startMs,
+        endMs: seg.endMs,
+        png: await flatten(seg.shapes),
+      });
+    }
+    return packOverlays(packed);
   }
 
   return (
@@ -312,6 +354,7 @@ export function VideoEditor({ params }: VideoEditorProps) {
           <Canvas
             baseImage={baseImage}
             hideBase
+            isShapeVisible={(shape) => visibleAt(shape, current)}
             onConfirmCrop={() => {
               // Unlike the image editor, the crop is not baked here: doing so
               // would mean re-encoding the whole clip just to preview it. It
@@ -347,6 +390,11 @@ export function VideoEditor({ params }: VideoEditorProps) {
         onTrimChange={setTrim}
         onSeek={seek}
         onTogglePlay={togglePlay}
+        elementRange={elementRange}
+        onElementRangeChange={(range) => {
+          if (!selected) return;
+          updateShape(selected.id, { startMs: range.start, endMs: range.end });
+        }}
       />
 
       <div className="flex items-center gap-3 px-3 h-8 border-t border-[var(--border)] bg-[var(--surface)]">
@@ -354,6 +402,43 @@ export function VideoEditor({ params }: VideoEditorProps) {
           {info.width} × {info.height} · {formatTimecode(outMs)}
           {info.has_audio ? " · audio" : ""}
         </span>
+
+        {selected && (
+          <div className="flex items-center gap-2 ml-auto">
+            {isTimed ? (
+              <>
+                <span className="text-[11px] font-mono text-[var(--fg-muted)] tabular-nums">
+                  shows {formatTimecode(elementRange!.start)}–
+                  {formatTimecode(elementRange!.end)}
+                </span>
+                <button
+                  type="button"
+                  className="text-[11px] text-[var(--fg-muted)] hover:text-[var(--fg)] underline underline-offset-2"
+                  onClick={() =>
+                    updateShape(selected.id, { startMs: undefined, endMs: undefined })
+                  }
+                >
+                  Show for the whole clip
+                </button>
+              </>
+            ) : (
+              <button
+                type="button"
+                className="text-[11px] text-[var(--fg-muted)] hover:text-[var(--fg)] underline underline-offset-2"
+                onClick={() => {
+                  // Starts at the playhead and runs to the end, which is what
+                  // "from here on" means and the most common thing wanted.
+                  updateShape(selected.id, {
+                    startMs: Math.round(current),
+                    endMs: info.duration_ms,
+                  });
+                }}
+              >
+                Limit to a time range
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <VideoExportBar

@@ -55,6 +55,10 @@ interface CanvasProps {
   /** Rendered behind both canvases at exactly the image's size and zoom --
    * the Video Editor's `<video>` element. */
   underlay?: React.ReactNode;
+  /** Hides shapes the caller says are not on screen right now. The Video
+   * Editor uses it for time-ranged elements, so the preview shows what the
+   * export will actually contain at the playhead. */
+  isShapeVisible?: (shape: Shape) => boolean;
 }
 
 interface DragState {
@@ -104,6 +108,7 @@ export function Canvas({
   textBoxes = null,
   hideBase = false,
   underlay,
+  isShapeVisible,
 }: CanvasProps) {
   const baseCanvasRef = useRef<HTMLCanvasElement>(null);
   const annCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -213,7 +218,9 @@ export function Canvas({
     const ctx = c.getContext("2d")!;
     // The shape being edited is hidden here -- it's shown "live" by the
     // textarea overlay instead, so rendering it too would double it up.
-    const visible = shapes.filter((sh) => sh.id !== editingId);
+    const visible = shapes.filter(
+      (sh) => sh.id !== editingId && (isShapeVisible?.(sh) ?? true),
+    );
     if (draft) visible.push(draft);
     render(ctx, visible, {
       // The adjusted canvas, not the raw bitmap: a censor or loupe sampling
@@ -244,7 +251,7 @@ export function Canvas({
     if (alignGuides.length > 0) {
       drawAlignGuides(ctx, alignGuides, imageWidth, imageHeight, zoom);
     }
-  }, [shapes, draft, baseImage, imageWidth, imageHeight, selectedId, cropRect, ocrRect, measureLine, zoom, tool, editingId, imageTick, alignGuides, baseTick]);
+  }, [shapes, draft, baseImage, imageWidth, imageHeight, selectedId, cropRect, ocrRect, measureLine, zoom, tool, editingId, imageTick, alignGuides, baseTick, isShapeVisible]);
 
   /** Colour of one image pixel *as displayed*: base bitmap with the
    * annotation layer composited over it, so picking inside a spotlight's dim

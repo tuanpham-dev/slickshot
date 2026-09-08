@@ -857,6 +857,8 @@ mod live_tests {
         let crop = PhysRect::new(0, 0, before.width / 2, before.height / 2);
         let out_size = (320u32, 240u32);
         let censors = vec![Censor {
+                start_ms: None,
+                end_ms: None,
             rect: PhysRect::new(0, 0, 100, 100),
             mode: CensorMode::Solid { r: 0, g: 0, b: 0 },
         }];

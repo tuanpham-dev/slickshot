@@ -11,9 +11,14 @@ interface TimelineProps {
   onTrimChange: (trim: Trim) => void;
   onSeek: (ms: number) => void;
   onTogglePlay: () => void;
+  /** When an element is selected and time-ranged, the span it is on screen
+   * for -- shown as a second bar under the trim so both are visible at once.
+   * `null` when nothing is selected. */
+  elementRange?: { start: number; end: number } | null;
+  onElementRangeChange?: (range: { start: number; end: number }) => void;
 }
 
-type Drag = "start" | "end" | "playhead";
+type Drag = "start" | "end" | "playhead" | "elStart" | "elEnd";
 
 /** The scrubber: a track with the excluded ranges dimmed, two trim handles
  * and a playhead. No filmstrip -- decoding thumbnails for a long recording
@@ -26,6 +31,8 @@ export function Timeline({
   onTrimChange,
   onSeek,
   onTogglePlay,
+  elementRange = null,
+  onElementRangeChange,
 }: TimelineProps) {
   const trackRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(0);
@@ -59,8 +66,16 @@ export function Timeline({
         onSeek(ms);
       } else if (drag === "start") {
         onTrimChange(clampTrim({ ...trim, start: ms }, duration, "start"));
-      } else {
+      } else if (drag === "end") {
         onTrimChange(clampTrim({ ...trim, end: ms }, duration, "end"));
+      } else if (elementRange && onElementRangeChange) {
+        // Reuses the trim clamp, so an element's bounds obey the same
+        // minimum length and cannot cross each other either.
+        const next =
+          drag === "elStart"
+            ? clampTrim({ ...elementRange, start: ms }, duration, "start")
+            : clampTrim({ ...elementRange, end: ms }, duration, "end");
+        onElementRangeChange(next);
       }
     }
     function onUp() {
@@ -72,7 +87,7 @@ export function Timeline({
       window.removeEventListener("pointermove", onMove);
       window.removeEventListener("pointerup", onUp);
     };
-  }, [drag, duration, msAt, onSeek, onTrimChange, trim]);
+  }, [drag, duration, msAt, onSeek, onTrimChange, trim, elementRange, onElementRangeChange]);
 
   const startPx = msToPx(trim.start, width, duration);
   const endPx = msToPx(trim.end, width, duration);
@@ -136,6 +151,53 @@ export function Timeline({
             setDrag("end");
           }}
         />
+
+        {/* The selected element's own span, as a slim bar along the bottom
+            of the same track -- a separate lane would double the timeline's
+            height for something only visible while one element is selected. */}
+        {elementRange && (
+          <>
+            <div
+              className="absolute bottom-0 h-1.5 bg-[var(--warning,#e0a33b)] rounded-full pointer-events-none"
+              style={{
+                left: msToPx(elementRange.start, width, duration),
+                width: Math.max(
+                  2,
+                  msToPx(elementRange.end, width, duration) -
+                    msToPx(elementRange.start, width, duration),
+                ),
+              }}
+            />
+            <div
+              role="slider"
+              aria-label="Element start"
+              aria-valuenow={elementRange.start}
+              aria-valuemin={0}
+              aria-valuemax={duration}
+              tabIndex={0}
+              className="absolute bottom-0 h-3 w-2 -ml-1 bg-[var(--warning,#e0a33b)] rounded-sm cursor-ew-resize"
+              style={{ left: msToPx(elementRange.start, width, duration) }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                setDrag("elStart");
+              }}
+            />
+            <div
+              role="slider"
+              aria-label="Element end"
+              aria-valuenow={elementRange.end}
+              aria-valuemin={0}
+              aria-valuemax={duration}
+              tabIndex={0}
+              className="absolute bottom-0 h-3 w-2 -ml-1 bg-[var(--warning,#e0a33b)] rounded-sm cursor-ew-resize"
+              style={{ left: msToPx(elementRange.end, width, duration) }}
+              onPointerDown={(e) => {
+                e.stopPropagation();
+                setDrag("elEnd");
+              }}
+            />
+          </>
+        )}
 
         <div
           aria-hidden

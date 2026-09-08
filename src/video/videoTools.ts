@@ -56,6 +56,65 @@ function normalise(x: number, y: number, w: number, h: number) {
   };
 }
 
+/** Whether an element is on screen at `ms`.
+ *
+ * Half-open: an element ending at 2000ms is gone at exactly 2000ms, so two
+ * elements that hand over at the same instant never both show for one frame.
+ * An absent bound means "from the beginning" / "to the end".
+ */
+export function visibleAt(shape: Shape, ms: number): boolean {
+  if (shape.startMs !== undefined && ms < shape.startMs) return false;
+  if (shape.endMs !== undefined && ms >= shape.endMs) return false;
+  return true;
+}
+
+/** One stretch of the clip over which the visible set of elements does not
+ * change, and the elements visible during it. */
+export interface OverlaySegment {
+  startMs: number;
+  endMs: number;
+  shapes: Shape[];
+}
+
+/** Splits the clip into the fewest stretches over which the overlay is
+ * constant.
+ *
+ * The backend composites one flattened image per frame, so time ranges are
+ * handled by flattening once per *segment* rather than once per frame: the
+ * only moments the overlay can change are the start and end times someone
+ * actually set, so those are the cut points. A clip with no time ranges comes
+ * back as a single segment, which is exactly what the old single-overlay path
+ * did.
+ */
+export function overlaySegments(shapes: Shape[], durationMs: number): OverlaySegment[] {
+  const drawn = shapesForOverlay(shapes);
+  const end = Math.max(1, Math.round(durationMs));
+
+  const cuts = new Set<number>([0, end]);
+  for (const s of drawn) {
+    for (const t of [s.startMs, s.endMs]) {
+      // A bound outside the clip cannot split anything.
+      if (t !== undefined && t > 0 && t < end) cuts.add(Math.round(t));
+    }
+  }
+  const points = [...cuts].sort((a, b) => a - b);
+
+  const out: OverlaySegment[] = [];
+  for (let i = 0; i < points.length - 1; i++) {
+    const startMs = points[i];
+    const endMs = points[i + 1];
+    if (endMs <= startMs) continue;
+    out.push({
+      startMs,
+      endMs,
+      // Sampled at the start of the segment: nothing changes inside one by
+      // construction, so any instant in it gives the same answer.
+      shapes: drawn.filter((s) => visibleAt(s, startMs)),
+    });
+  }
+  return out;
+}
+
 /** The censor shapes, as the per-frame `Censor` list the backend applies.
  *
  * These cannot travel in the flattened overlay PNG like other annotations: an
@@ -70,17 +129,24 @@ export function extractCensors(shapes: Shape[]): Censor[] {
     const rect = normalise(shape.x, shape.y, shape.w, shape.h);
     if (rect.w <= 0 || rect.h <= 0) continue;
 
+    // Censors need no segmenting: they already travel as rects applied per
+    // frame, so a time range is two more numbers on the rect.
+    const when = {
+      start_ms: shape.startMs !== undefined ? Math.round(shape.startMs) : null,
+      end_ms: shape.endMs !== undefined ? Math.round(shape.endMs) : null,
+    };
     const mode: CensorMode = shape.mode ?? "pixelate";
     if (mode === "solid") {
-      out.push({ rect, kind: "solid", ...parseHex(shape.color) });
+      out.push({ rect, ...when, kind: "solid", ...parseHex(shape.color) });
     } else if (mode === "blur") {
       // The editor expresses strength as a block size; the backend wants a
       // gaussian sigma. Half the block reads about the same on screen.
       const sigma = Math.min(MAX_SIGMA, Math.max(1, (shape.blockSize ?? DEFAULT_BLOCK) / 2));
-      out.push({ rect, kind: "blur", sigma });
+      out.push({ rect, ...when, kind: "blur", sigma });
     } else {
       out.push({
         rect,
+        ...when,
         kind: "pixelate",
         block: Math.max(2, Math.round(shape.blockSize ?? DEFAULT_BLOCK)),
       });
@@ -103,4 +169,37 @@ export function hasEdits(
   speed: number,
 ): boolean {
   return shapes.length > 0 || crop !== null || Math.abs(speed - 1) > 1e-6;
+}
+
+/** Magic matching `video.rs`'s `OVERLAY_MAGIC`. */
+const OVERLAY_MAGIC = [0x53, 0x53, 0x4f, 0x56]; // "SSOV"
+
+/** Packs several segment overlays into one raw IPC body.
+ *
+ * A command takes either a JSON payload or a raw one, never both, and the
+ * JSON half already carries the export options -- so the overlays share the
+ * raw body through this small container. A single whole-clip overlay is sent
+ * as a bare PNG instead, which is what the backend's non-magic path reads and
+ * what every export sent before time ranges existed looked like.
+ */
+export function packOverlays(segments: { startMs: number; endMs: number; png: Uint8Array }[]): Uint8Array {
+  if (segments.length === 0) return new Uint8Array(0);
+
+  const header = 4 + 4;
+  const total =
+    header + segments.reduce((n, s) => n + 8 + 8 + 4 + s.png.length, 0);
+  const out = new Uint8Array(total);
+  const view = new DataView(out.buffer);
+  out.set(OVERLAY_MAGIC, 0);
+  view.setUint32(4, segments.length, true);
+
+  let at = header;
+  for (const seg of segments) {
+    view.setBigUint64(at, BigInt(Math.max(0, Math.round(seg.startMs))), true);
+    view.setBigUint64(at + 8, BigInt(Math.max(0, Math.round(seg.endMs))), true);
+    view.setUint32(at + 16, seg.png.length, true);
+    out.set(seg.png, at + 20);
+    at += 20 + seg.png.length;
+  }
+  return out;
 }

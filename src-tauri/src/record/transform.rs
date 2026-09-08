@@ -26,8 +26,30 @@ pub enum CensorMode {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Censor {
     pub rect: PhysRect,
+    /// When this censor applies, in ms from the start of the clip. `None` on
+    /// either side is unbounded, which is what a censor with no time range
+    /// set sends -- and what every censor sent before time ranges existed
+    /// deserialises to.
+    #[serde(default)]
+    pub start_ms: Option<u64>,
+    #[serde(default)]
+    pub end_ms: Option<u64>,
     #[serde(flatten)]
     pub mode: CensorMode,
+}
+
+impl Censor {
+    /// Half-open, matching the editor: a censor ending at 2000ms is gone at
+    /// exactly 2000ms.
+    pub fn covers(&self, ms: u64) -> bool {
+        if self.start_ms.is_some_and(|start| ms < start) {
+            return false;
+        }
+        if self.end_ms.is_some_and(|end| ms >= end) {
+            return false;
+        }
+        true
+    }
 }
 
 /// Clamps `rect` to the frame and returns it in pixel coordinates, or `None`
@@ -96,8 +118,19 @@ pub fn composite_overlay(frame: &mut RgbaImage, overlay: &RgbaImage) {
 /// from the next value up anyway.
 const MAX_BLUR_SIGMA: f32 = 12.0;
 
+/// Applies every censor, whatever its time range. For callers with no clock
+/// of their own.
 pub fn apply_censors(frame: &mut RgbaImage, censors: &[Censor]) {
+    apply_censors_at(frame, censors, None);
+}
+
+/// Applies the censors covering `at_ms`, or all of them when `at_ms` is
+/// `None`.
+pub fn apply_censors_at(frame: &mut RgbaImage, censors: &[Censor], at_ms: Option<u64>) {
     for censor in censors {
+        if at_ms.is_some_and(|ms| !censor.covers(ms)) {
+            continue;
+        }
         let Some((x, y, w, h)) = clamped(frame, censor.rect) else {
             continue;
         };
@@ -249,6 +282,8 @@ mod tests {
         apply_censors(
             &mut frame,
             &[Censor {
+                start_ms: None,
+                end_ms: None,
                 rect: PhysRect::new(0, 0, 8, 8),
                 mode: CensorMode::Pixelate { block: 8 },
             }],
@@ -267,6 +302,8 @@ mod tests {
         apply_censors(
             &mut frame,
             &[Censor {
+                start_ms: None,
+                end_ms: None,
                 rect: PhysRect::new(2, 2, 3, 3),
                 mode: CensorMode::Solid { r: 255, g: 0, b: 0 },
             }],
@@ -290,6 +327,8 @@ mod tests {
         apply_censors(
             &mut frame,
             &[Censor {
+                start_ms: None,
+                end_ms: None,
                 rect: PhysRect::new(0, 0, 20, 20),
                 mode: CensorMode::Blur { sigma: 4.0 },
             }],
@@ -309,6 +348,8 @@ mod tests {
         apply_censors(
             &mut frame,
             &[Censor {
+                start_ms: None,
+                end_ms: None,
                 rect: PhysRect::new(50, 50, 10, 10),
                 mode: CensorMode::Solid { r: 255, g: 0, b: 0 },
             }],

@@ -587,7 +587,14 @@ export type CensorMode =
   | { kind: "pixelate"; block: number }
   | { kind: "blur"; sigma: number };
 
-export type Censor = { rect: PhysRect } & CensorMode;
+/** When a censor is applied, in ms from the start of the clip. `null` on
+ * either side means unbounded -- the whole clip, which is the default. */
+export interface CensorWhen {
+  start_ms?: number | null;
+  end_ms?: number | null;
+}
+
+export type Censor = { rect: PhysRect } & CensorWhen & CensorMode;
 
 export type VideoDest = { kind: "path"; path: string } | { kind: "quicksave" };
 

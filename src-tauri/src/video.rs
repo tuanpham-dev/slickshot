@@ -283,16 +283,7 @@ pub async fn video_export(
         .state::<VideoStore>()
         .get(&req.id)
         .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
-
-    let overlay = if bytes.is_empty() {
-        None
-    } else {
-        Some(
-            image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-                .map_err(|e| CommandError::Image(e.to_string()))?
-                .to_rgba8(),
-        )
-    };
+    let overlays = decode_overlays(parse_overlays(&bytes)?, req.crop)?;
 
     let settings = crate::settings::get_settings(app.clone()).unwrap_or_default();
     let dest = match &req.dest {
@@ -312,7 +303,7 @@ pub async fn video_export(
     let worker_app = app.clone();
     let worker_dest = dest.clone();
     let saved = tauri::async_runtime::spawn_blocking(move || {
-        run_export(&worker_app, &src, &worker_dest, &req, overlay.as_ref())
+        run_export(&worker_app, &src, &worker_dest, &req, overlays)
     })
     .await
     .map_err(|e| CommandError::Image(e.to_string()))??;
@@ -324,6 +315,95 @@ pub async fn video_export(
     })
 }
 
+/// One flattened overlay and the stretch of the clip it covers.
+pub struct OverlaySegment {
+    pub range: TimeRange,
+    pub image: RgbaImage,
+}
+
+/// Magic for the multi-overlay container. A body that does not start with it
+/// is a single PNG covering the whole clip -- which is what every export sent
+/// before time ranges existed, and what a clip with no time-ranged element
+/// still sends.
+const OVERLAY_MAGIC: &[u8; 4] = b"SSOV";
+
+/// Parses the raw request body into overlays.
+///
+/// Several overlays have to share one body because a Tauri command takes
+/// either a JSON payload or a raw one, never both, and the JSON half is
+/// already carrying the export options. The container is deliberately dull:
+/// magic, a count, then per segment a start, an end, a length and the PNG.
+fn parse_overlays(bytes: &[u8]) -> CommandResult<Vec<(TimeRange, Vec<u8>)>> {
+    if bytes.is_empty() {
+        return Ok(Vec::new());
+    }
+    if bytes.len() < 4 || &bytes[..4] != OVERLAY_MAGIC {
+        // A bare PNG: one overlay, the whole clip.
+        return Ok(vec![(
+            TimeRange {
+                start_ms: 0,
+                end_ms: u64::MAX,
+            },
+            bytes.to_vec(),
+        )]);
+    }
+
+    let bad = || CommandError::Image("that overlay bundle is malformed".into());
+    let mut at = 4usize;
+    let read_u32 = |at: &mut usize| -> Option<u32> {
+        let end = at.checked_add(4)?;
+        let v = u32::from_le_bytes(bytes.get(*at..end)?.try_into().ok()?);
+        *at = end;
+        Some(v)
+    };
+    let read_u64 = |at: &mut usize| -> Option<u64> {
+        let end = at.checked_add(8)?;
+        let v = u64::from_le_bytes(bytes.get(*at..end)?.try_into().ok()?);
+        *at = end;
+        Some(v)
+    };
+
+    let count = read_u32(&mut at).ok_or_else(bad)? as usize;
+    // A count far past what the body could hold means a corrupt header, not a
+    // huge allocation.
+    if count > 4096 {
+        return Err(bad());
+    }
+    let mut out = Vec::with_capacity(count);
+    for _ in 0..count {
+        let start_ms = read_u64(&mut at).ok_or_else(bad)?;
+        let end_ms = read_u64(&mut at).ok_or_else(bad)?;
+        let len = read_u32(&mut at).ok_or_else(bad)? as usize;
+        let end = at.checked_add(len).ok_or_else(bad)?;
+        let png = bytes.get(at..end).ok_or_else(bad)?.to_vec();
+        at = end;
+        out.push((TimeRange { start_ms, end_ms }, png));
+    }
+    Ok(out)
+}
+
+/// Decodes the parsed overlays, cropping each to match the frames.
+fn decode_overlays(
+    parsed: Vec<(TimeRange, Vec<u8>)>,
+    crop: Option<PhysRect>,
+) -> CommandResult<Vec<OverlaySegment>> {
+    parsed
+        .into_iter()
+        .map(|(range, png)| {
+            let image = image::load_from_memory_with_format(&png, image::ImageFormat::Png)
+                .map_err(|e| CommandError::Image(e.to_string()))?
+                .to_rgba8();
+            Ok(OverlaySegment {
+                range,
+                image: match crop {
+                    Some(crop) => transform::crop(&image, crop),
+                    None => image,
+                },
+            })
+        })
+        .collect()
+}
+
 /// The crop-relative form of everything the export applies per frame.
 ///
 /// The editor works in the *source* clip's coordinates -- a censor at (100,
@@ -332,12 +412,13 @@ pub async fn video_export(
 /// match is done once here rather than per frame.
 struct Prepared {
     censors: Vec<Censor>,
-    overlay: Option<RgbaImage>,
+    /// One entry when nothing is time-ranged; one per segment otherwise.
+    overlays: Vec<OverlaySegment>,
     output: (u32, u32),
 }
 
 impl Prepared {
-    fn new(req: &VideoExportRequest, overlay: Option<&RgbaImage>) -> Self {
+    fn new(req: &VideoExportRequest, overlays: Vec<OverlaySegment>) -> Self {
         let (dx, dy) = req.crop.map(|c| (c.x, c.y)).unwrap_or((0, 0));
         let censors = req
             .censors
@@ -345,17 +426,46 @@ impl Prepared {
             .map(|c| Censor {
                 rect: PhysRect::new(c.rect.x - dx, c.rect.y - dy, c.rect.w, c.rect.h),
                 mode: c.mode,
+                start_ms: c.start_ms,
+                end_ms: c.end_ms,
             })
             .collect();
-        let overlay = overlay.map(|o| match req.crop {
-            Some(crop) => transform::crop(o, crop),
-            None => o.clone(),
-        });
         Self {
             censors,
-            overlay,
+            overlays,
             output: req.output_size,
         }
+    }
+
+    /// The overlay covering `ms`, if any. Segments do not overlap, so the
+    /// first match is the only one.
+    fn overlay_at(&self, ms: u64) -> Option<&RgbaImage> {
+        self.overlays
+            .iter()
+            .find(|o| ms >= o.range.start_ms && ms < o.range.end_ms)
+            .map(|o| &o.image)
+    }
+
+    /// Convenience for a single whole-clip overlay, which is what an export
+    /// with no time ranges builds. Used by the tests; the commands go through
+    /// `parse_overlays`, which produces the same thing from a bare PNG.
+    #[cfg(test)]
+    fn whole_clip(req: &VideoExportRequest, overlay: Option<&RgbaImage>) -> Self {
+        let overlays = overlay
+            .map(|o| {
+                vec![OverlaySegment {
+                    range: TimeRange {
+                        start_ms: 0,
+                        end_ms: u64::MAX,
+                    },
+                    image: match req.crop {
+                        Some(crop) => transform::crop(o, crop),
+                        None => o.clone(),
+                    },
+                }]
+            })
+            .unwrap_or_default();
+        Self::new(req, overlays)
     }
 }
 
@@ -367,14 +477,19 @@ impl Prepared {
 /// on after the censors: an arrow blacked out by a censor drawn beneath it is
 /// never what someone meant, whereas a censor still covers every pixel of
 /// video the overlay leaves clear.
-fn process_frame(frame: &mut RgbaImage, prepared: &Prepared, crop: Option<PhysRect>) {
+fn process_frame(
+    frame: &mut RgbaImage,
+    prepared: &Prepared,
+    crop: Option<PhysRect>,
+    at_ms: u64,
+) {
     if let Some(crop) = crop {
         *frame = transform::crop(frame, crop);
     }
     if !prepared.censors.is_empty() {
-        transform::apply_censors(frame, &prepared.censors);
+        transform::apply_censors_at(frame, &prepared.censors, Some(at_ms));
     }
-    if let Some(overlay) = &prepared.overlay {
+    if let Some(overlay) = prepared.overlay_at(at_ms) {
         transform::composite_overlay(frame, overlay);
     }
     let (w, h) = prepared.output;
@@ -388,11 +503,11 @@ fn run_export(
     src: &Path,
     dest: &Path,
     req: &VideoExportRequest,
-    overlay: Option<&RgbaImage>,
+    overlays: Vec<OverlaySegment>,
 ) -> CommandResult<PathBuf> {
     let backend = crate::record::default_backend();
     let total_ms = req.range.duration_ms().max(1);
-    let prepared = Prepared::new(req, overlay);
+    let prepared = Prepared::new(req, overlays);
 
     match req.format {
         VideoFormat::Mp4 => {
@@ -410,7 +525,13 @@ fn run_export(
             let mut last_report = 0u64;
             backend
                 .transcode(src, dest, &opts, &mut |mut frame| {
-                    process_frame(&mut frame.image, &prepared, req.crop);
+                    // Transcode hands over *trim-relative* times, while the
+                    // editor sets time ranges against the whole clip -- so the
+                    // trim's start goes back on before anything is matched.
+                    // (`decode_frames`, used by the GIF branch below, gives
+                    // absolute times already.)
+                    let at_ms = req.range.start_ms + frame.pts_ms;
+                    process_frame(&mut frame.image, &prepared, req.crop, at_ms);
                     let elapsed = frame.pts_ms;
                     frame.pts_ms = (frame.pts_ms as f64 / speed) as u64;
                     // Throttled: a 30fps export would otherwise emit an event
@@ -452,7 +573,8 @@ fn run_export(
             let mut last_report = 0u64;
             backend
                 .decode_frames(src, req.range, src_fps, &mut |mut frame| {
-                    process_frame(&mut frame.image, &prepared, req.crop);
+                    // Already absolute clip time, unlike the transcode path.
+                    process_frame(&mut frame.image, &prepared, req.crop, frame.pts_ms);
                     if frame.image.dimensions() != gif_size {
                         frame.image = transform::resize(&frame.image, gif_size.0, gif_size.1);
                     }
@@ -572,15 +694,6 @@ pub async fn video_upload(
             ))
         }
     };
-    let overlay = if bytes.is_empty() {
-        None
-    } else {
-        Some(
-            image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-                .map_err(|e| CommandError::Image(e.to_string()))?
-                .to_rgba8(),
-        )
-    };
 
     let req = app
         .state::<PendingVideoExport>()
@@ -595,11 +708,12 @@ pub async fn video_upload(
         .get(&req.id)
         .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
 
+    let overlays = decode_overlays(parse_overlays(&bytes)?, req.crop)?;
     let temp = std::env::temp_dir().join(format!("slickshot-upload-{}.mp4", uuid::Uuid::new_v4()));
     let worker_app = app.clone();
     let worker_temp = temp.clone();
     let built = tauri::async_runtime::spawn_blocking(move || {
-        run_export(&worker_app, &src, &worker_temp, &req, overlay.as_ref())
+        run_export(&worker_app, &src, &worker_temp, &req, overlays)
     })
     .await
     .map_err(|e| CommandError::Image(e.to_string()))?;
@@ -649,15 +763,6 @@ pub async fn video_copy_file(
         tauri::ipc::InvokeBody::Raw(bytes) => bytes.clone(),
         tauri::ipc::InvokeBody::Json(_) => Vec::new(),
     };
-    let overlay = if bytes.is_empty() {
-        None
-    } else {
-        Some(
-            image::load_from_memory_with_format(&bytes, image::ImageFormat::Png)
-                .map_err(|e| CommandError::Image(e.to_string()))?
-                .to_rgba8(),
-        )
-    };
 
     let req = app
         .state::<PendingVideoExport>()
@@ -672,10 +777,11 @@ pub async fn video_copy_file(
         .get(&req.id)
         .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
 
+    let overlays = decode_overlays(parse_overlays(&bytes)?, req.crop)?;
     let info = crate::record::default_backend()
         .probe(&src)
         .map_err(|e| CommandError::Image(e.to_string()))?;
-    if is_untouched(&req, &info) && overlay.is_none() {
+    if is_untouched(&req, &info) && overlays.is_empty() {
         return crate::record::clipboard::copy_file(&src).map_err(CommandError::Image);
     }
 
@@ -698,7 +804,7 @@ pub async fn video_copy_file(
     let worker_app = app.clone();
     let worker_dest = dest.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        run_export(&worker_app, &src, &worker_dest, &req, overlay.as_ref())
+        run_export(&worker_app, &src, &worker_dest, &req, overlays)
     })
     .await
     .map_err(|e| CommandError::Image(e.to_string()))??;
@@ -799,7 +905,7 @@ mod tests {
         let mut frame = RgbaImage::from_pixel(100, 80, image::Rgba([10, 20, 30, 255]));
         let mut req = request((20, 20));
         req.crop = Some(PhysRect::new(10, 10, 40, 40));
-        process_frame(&mut frame, &Prepared::new(&req, None), req.crop);
+        process_frame(&mut frame, &Prepared::whole_clip(&req, None), req.crop, 0);
         assert_eq!(frame.dimensions(), (20, 20), "the output size wins");
     }
 
@@ -807,7 +913,7 @@ mod tests {
     fn a_frame_with_no_crop_is_still_resized() {
         let mut frame = RgbaImage::from_pixel(64, 64, image::Rgba([1, 2, 3, 255]));
         let req = request((32, 16));
-        process_frame(&mut frame, &Prepared::new(&req, None), None);
+        process_frame(&mut frame, &Prepared::whole_clip(&req, None), None, 0);
         assert_eq!(frame.dimensions(), (32, 16));
     }
 
@@ -818,13 +924,15 @@ mod tests {
         let mut frame = RgbaImage::from_pixel(8, 8, image::Rgba([200, 200, 200, 255]));
         let mut req = request((8, 8));
         req.censors = vec![Censor {
+                start_ms: None,
+                end_ms: None,
             rect: PhysRect::new(0, 0, 8, 8),
             mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
         }];
         let mut overlay = RgbaImage::from_pixel(8, 8, image::Rgba([0, 0, 0, 0]));
         overlay.put_pixel(2, 2, image::Rgba([255, 0, 0, 255]));
 
-        process_frame(&mut frame, &Prepared::new(&req, Some(&overlay)), None);
+        process_frame(&mut frame, &Prepared::whole_clip(&req, Some(&overlay)), None, 0);
         assert_eq!(
             frame.get_pixel(2, 2).0,
             [255, 0, 0, 255],
@@ -847,11 +955,13 @@ mod tests {
         let mut req = request((100, 100));
         req.crop = Some(PhysRect::new(50, 50, 100, 100));
         req.censors = vec![Censor {
+                start_ms: None,
+                end_ms: None,
             rect: PhysRect::new(60, 60, 20, 20),
             mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
         }];
-        let prepared = Prepared::new(&req, None);
-        process_frame(&mut frame, &prepared, req.crop);
+        let prepared = Prepared::whole_clip(&req, None);
+        process_frame(&mut frame, &prepared, req.crop, 0);
 
         assert_eq!(
             frame.get_pixel(15, 15).0,
@@ -876,8 +986,8 @@ mod tests {
         let mut overlay = RgbaImage::from_pixel(200, 200, image::Rgba([0, 0, 0, 0]));
         overlay.put_pixel(120, 120, image::Rgba([255, 0, 0, 255]));
 
-        let prepared = Prepared::new(&req, Some(&overlay));
-        process_frame(&mut frame, &prepared, req.crop);
+        let prepared = Prepared::whole_clip(&req, Some(&overlay));
+        process_frame(&mut frame, &prepared, req.crop, 0);
         assert_eq!(
             frame.get_pixel(70, 70).0,
             [255, 0, 0, 255],
@@ -892,17 +1002,129 @@ mod tests {
         let mut frame = RgbaImage::from_pixel(200, 200, image::Rgba([255, 255, 255, 255]));
         let mut req = request((100, 100));
         req.censors = vec![Censor {
+                start_ms: None,
+                end_ms: None,
             rect: PhysRect::new(0, 0, 100, 100),
             mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
         }];
-        let prepared = Prepared::new(&req, None);
-        process_frame(&mut frame, &prepared, None);
+        let prepared = Prepared::whole_clip(&req, None);
+        process_frame(&mut frame, &prepared, None, 0);
 
         assert_eq!(frame.dimensions(), (100, 100));
         // The censored top-left quarter of the source is the top-left quarter
         // of the output too.
         assert_eq!(frame.get_pixel(20, 20).0, [0, 0, 0, 255]);
         assert_eq!(frame.get_pixel(70, 70).0, [255, 255, 255, 255]);
+    }
+
+    fn bundle(parts: &[(u64, u64, &[u8])]) -> Vec<u8> {
+        let mut out = OVERLAY_MAGIC.to_vec();
+        out.extend_from_slice(&(parts.len() as u32).to_le_bytes());
+        for (start, end, png) in parts {
+            out.extend_from_slice(&start.to_le_bytes());
+            out.extend_from_slice(&end.to_le_bytes());
+            out.extend_from_slice(&(png.len() as u32).to_le_bytes());
+            out.extend_from_slice(png);
+        }
+        out
+    }
+
+    #[test]
+    fn an_empty_body_means_no_overlay() {
+        assert!(parse_overlays(&[]).expect("parse").is_empty());
+    }
+
+    #[test]
+    fn a_bare_png_is_one_whole_clip_overlay() {
+        // What every export sent before time ranges existed, and what a clip
+        // with no time-ranged element still sends.
+        let png = b"\x89PNG\r\n\x1a\n rest".to_vec();
+        let out = parse_overlays(&png).expect("parse");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].0.start_ms, 0);
+        assert_eq!(out[0].0.end_ms, u64::MAX);
+        assert_eq!(out[0].1, png);
+    }
+
+    #[test]
+    fn a_bundle_round_trips_its_segments() {
+        let body = bundle(&[(0, 1000, b"first"), (1000, 4000, b"second")]);
+        let out = parse_overlays(&body).expect("parse");
+        assert_eq!(out.len(), 2);
+        assert_eq!((out[0].0.start_ms, out[0].0.end_ms), (0, 1000));
+        assert_eq!(out[0].1, b"first");
+        assert_eq!((out[1].0.start_ms, out[1].0.end_ms), (1000, 4000));
+        assert_eq!(out[1].1, b"second");
+    }
+
+    #[test]
+    fn a_truncated_bundle_is_an_error_not_a_panic() {
+        let body = bundle(&[(0, 1000, b"first")]);
+        for cut in [5, 8, 12, body.len() - 1] {
+            assert!(
+                parse_overlays(&body[..cut]).is_err(),
+                "a body cut at {cut} should be refused"
+            );
+        }
+    }
+
+    #[test]
+    fn an_absurd_segment_count_is_refused() {
+        // A corrupt header should not turn into a huge allocation.
+        let mut body = OVERLAY_MAGIC.to_vec();
+        body.extend_from_slice(&u32::MAX.to_le_bytes());
+        assert!(parse_overlays(&body).is_err());
+    }
+
+    #[test]
+    fn a_censor_applies_only_inside_its_time_range() {
+        let mut req = request((8, 8));
+        req.censors = vec![Censor {
+            rect: PhysRect::new(0, 0, 8, 8),
+            start_ms: Some(1_000),
+            end_ms: Some(2_000),
+            mode: crate::record::transform::CensorMode::Solid { r: 0, g: 0, b: 0 },
+        }];
+        let prepared = Prepared::new(&req, Vec::new());
+
+        for (at, censored) in [(0u64, false), (999, false), (1_000, true), (1_999, true), (2_000, false)] {
+            let mut frame = RgbaImage::from_pixel(8, 8, image::Rgba([255, 255, 255, 255]));
+            process_frame(&mut frame, &prepared, None, at);
+            let black = frame.get_pixel(4, 4).0 == [0, 0, 0, 255];
+            assert_eq!(black, censored, "at {at}ms");
+        }
+    }
+
+    #[test]
+    fn the_overlay_for_a_frame_is_the_segment_covering_it() {
+        let req = request((4, 4));
+        let red = RgbaImage::from_pixel(4, 4, image::Rgba([255, 0, 0, 255]));
+        let blue = RgbaImage::from_pixel(4, 4, image::Rgba([0, 0, 255, 255]));
+        let prepared = Prepared::new(
+            &req,
+            vec![
+                OverlaySegment {
+                    range: TimeRange { start_ms: 0, end_ms: 1_000 },
+                    image: red,
+                },
+                OverlaySegment {
+                    range: TimeRange { start_ms: 1_000, end_ms: 2_000 },
+                    image: blue,
+                },
+            ],
+        );
+
+        for (at, expect) in [(0u64, [255, 0, 0, 255]), (999, [255, 0, 0, 255]), (1_000, [0, 0, 255, 255])] {
+            let mut frame = RgbaImage::from_pixel(4, 4, image::Rgba([10, 10, 10, 255]));
+            process_frame(&mut frame, &prepared, None, at);
+            assert_eq!(frame.get_pixel(1, 1).0, expect, "at {at}ms");
+        }
+
+        // Past every segment: the frame is left alone rather than keeping the
+        // last overlay on screen forever.
+        let mut frame = RgbaImage::from_pixel(4, 4, image::Rgba([10, 10, 10, 255]));
+        process_frame(&mut frame, &prepared, None, 5_000);
+        assert_eq!(frame.get_pixel(1, 1).0, [10, 10, 10, 255]);
     }
 
     #[test]
