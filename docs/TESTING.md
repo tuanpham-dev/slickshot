@@ -19,6 +19,7 @@ These are the places the Rust source explicitly branches on `target_os`, so each
 | CLI console output on Windows | `main.rs` | Release builds set `windows_subsystem = "windows"` (no console), so `main.rs` calls `AttachConsole(ATTACH_PARENT_PROCESS)` to reattach to the launching terminal. This is the one piece of code that could not be tested at all during development (no Windows machine available). Verify from `cmd.exe` **and** PowerShell: `slickshot.exe list-monitors` prints to that same terminal, `slickshot.exe screen -o file.png` prints the path, exit codes are visible (`echo %ERRORLEVEL%` / `$LASTEXITCODE`). Try both a `cargo build` debug run and a real `tauri build` release binary — the `windows_subsystem` attribute only applies to release. |
 | Global hotkey key names | `hotkeys.rs`, Settings > Shortcuts | Default bindings use `"PrintScreen"`, `"Shift+PrintScreen"`, etc. Many keyboards (especially compact/laptop ones, and most Mac keyboards) don't have a dedicated Print Screen key. Verify the defaults register without error at startup (watch for `hotkeys:error` toasts), and if Print Screen isn't available on the test keyboard, rebind to something that is and confirm the rebind round-trips through Settings and still fires. |
 | macOS permissions | app-wide | `xcap`'s macOS capture backend needs **Screen Recording** permission (System Settings > Privacy & Security), and the global-hotkey plugin likely needs **Accessibility** permission. Neither is requested anywhere in this codebase — verify what actually happens on first launch (a system prompt? a silent failure? an empty/black capture?) and note it. |
+| **Screen recording, Windows and Linux** | `record/windows.rs`, `record/linux.rs`, `record/clipboard.rs` | **Neither backend has ever been compiled.** Cross-checking from the macOS development machine fails inside dependencies that need native toolchains (`ring` wants a Windows C toolchain's headers; `libdbus-sys` wants pkg-config), so these files are written from the API documentation and reviewed, but no compiler has seen them. Expect build errors first, then runtime ones. The Media Foundation reference-time conversion (100ns units), the frame pacing and the GStreamer pipeline description are the parts that were extracted into `transform.rs` / pure functions so they *are* unit-tested cross-platform — everything around them is not. |
 | Unsigned build / Gatekeeper | packaging | The bundle isn't code-signed or notarized. A freshly built `.app`/`.exe` will likely be flagged (macOS Gatekeeper "unidentified developer"; Windows SmartScreen). Note whatever workaround was needed (`xattr -cr`, right-click Open, "Run anyway") so it can be documented for real users later. |
 
 ## Setup
@@ -115,6 +116,79 @@ thresholds change:
 - [ ] The censor is strong enough to be unrecognizable on a large face -- the
       block size scales with the face, so it should not depend on the slider
 - [ ] An image with no faces reports "No faces found" rather than erroring
+
+## Screen recording — Windows and Linux hand-off
+
+Recording, the video editor and the native file clipboard were built and
+verified on macOS only. The two other backends are unverified to the point of
+never having been compiled, so this checklist starts further back than the
+others: the first item is "does it build".
+
+Work through it in order — a failure early on makes everything below it
+meaningless. Report what happened at each step rather than only the end state;
+"the sink writer returns E_INVALIDARG on AddStream" is far more useful than
+"recording doesn't work".
+
+### 0. It compiles
+
+- [ ] `cargo check` completes on the target platform
+- [ ] `cargo clippy --all-targets` is clean
+- [ ] `cargo test` passes (the pure recording tests — pacing, bitrate,
+      pipeline description, reference-time conversion — should already pass,
+      since they run on every platform)
+
+Paste the first 20 lines of any compiler error; the fixes belong in T5.1/T5.2.
+
+### 1. It records
+
+- [ ] The Record tile is not dimmed. **Linux:** if it is, that is
+      `record_engine_status` reporting no GStreamer or no H.264 encoder —
+      check the message, then `apt install gstreamer1.0-plugins-ugly`
+- [ ] Pick a region, record ~10 seconds while moving a window through it
+- [ ] The pill appears below the region with a running clock, and Stop ends it
+- [ ] `slickshot probe <file>` reports plausible dimensions, a duration within
+      ~200ms of what you recorded, and a frame rate near the configured one
+- [ ] The file plays in the system video player, and the moving window
+      actually moves — a static or stuttering result means the frame pacing
+      or the timestamps are wrong
+- [ ] Recording with an audio toggle on shows the "audio isn't available on
+      this platform" warning rather than silently producing a silent file
+- [ ] `slickshot record --duration 5 -o clip.mp4` works headlessly
+
+### 2. The editor
+
+- [ ] The Video Editor opens on the finished recording and shows the clip
+- [ ] Clicking mid-timeline seeks (this exercises the Range protocol)
+- [ ] Dragging the out point dims the excluded range and the duration updates
+- [ ] Draw a rectangle and a censor; the censor previews as blocky
+- [ ] Quick save → `probe` reports the *trimmed* duration
+- [ ] Open a frame of the export: the rectangle is burnt in where it was
+      drawn, and the censored area is obscured **in every frame** — scrub
+      through rather than checking only the first
+- [ ] 2x speed export halves the duration
+- [ ] GIF export at 15fps produces a looping GIF, capped to the configured
+      max width
+
+### 3. The file clipboard
+
+- [ ] Copy file, then paste into Explorer (Windows) or Nautilus/Files (Linux):
+      a copy of the recording appears
+- [ ] Paste into a mail or chat window: it attaches
+- [ ] After a trim, the pasted file is the *trimmed* one
+
+**Windows** uses `CF_HDROP`, whose payload needs a double-NUL terminator and
+`fWide = TRUE`; a missing terminator makes Explorer ignore the paste silently,
+and a wrong `fWide` produces mojibake. **Linux** owns the X11 CLIPBOARD
+selection from a detached thread and serves `text/uri-list` — it stops working
+the moment another app takes the selection, which is correct, but means "copy,
+then copy something else, then paste" should paste the *other* thing.
+
+### 4. Linux only — the missing-GStreamer path
+
+- [ ] `sudo apt remove gstreamer1.0-plugins-ugly` (and any VA-API plugins)
+- [ ] Restart the app: the Record tile is dimmed with a warning dot, clicking
+      it explains what to install, and Settings > Recording shows the same
+- [ ] Reinstall, restart, confirm it comes back
 
 ## Reporting results
 

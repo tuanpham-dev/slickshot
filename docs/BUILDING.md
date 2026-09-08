@@ -8,6 +8,28 @@ pnpm tauri build
 
 Produces release bundles under `src-tauri/target/release/bundle/` — `deb/` and `rpm/` on Fedora/most Linux distros, plus an `appimage/` attempt (see below). Pass `--bundles <deb,rpm,appimage>` to build a subset, e.g. `pnpm tauri build --bundles appimage` to (re)build just one format without recompiling from scratch if `target/release` is already up to date.
 
+## Linux: recording needs GStreamer
+
+Screen recording on Linux encodes through GStreamer, so the development
+headers are needed to build and the plugins are needed to run:
+
+```
+# Debian/Ubuntu
+sudo apt install libgstreamer1.0-dev libgstreamer-plugins-base1.0-dev \
+                 gstreamer1.0-plugins-good gstreamer1.0-plugins-bad \
+                 gstreamer1.0-plugins-ugly
+
+# Fedora
+sudo dnf install gstreamer1-devel gstreamer1-plugins-base-devel \
+                 gstreamer1-plugins-good gstreamer1-plugins-bad-free \
+                 gstreamer1-plugins-ugly-free
+```
+
+`plugins-ugly` is where x264 lives; without some H.264 encoder the app still
+builds and runs, but the Record tile dims and explains what is missing. The
+runtime packages are declared as dependencies of the `.deb` and `.rpm`, so an
+installed build pulls them in — this list is for building from source.
+
 ## macOS: unsigned builds say "is damaged and can't be opened"
 
 Neither `tauri.conf.json` nor the CI workflow configures code signing or notarization (that needs an active Apple Developer Program membership), so the `.app`/`.dmg` Tauri produces is only ad-hoc/linker-signed — no Team ID. That's fine for a build you compile and run yourself, since it was never downloaded and so never picked up the quarantine attribute Gatekeeper checks. But a build fetched via a browser (a CI artifact, a release download) does get quarantined, and Gatekeeper won't accept an ad-hoc signature on a quarantined app — instead of the friendlier "unidentified developer" prompt you'd get from an unsigned-but-not-quarantined app, it reports the misleading **"is damaged and can't be opened, you should move it to the Trash."** The app isn't actually corrupted.

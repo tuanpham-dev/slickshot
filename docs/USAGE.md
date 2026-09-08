@@ -31,6 +31,54 @@ From the toolbar's split export button: Copy (`Ctrl+C`), Save As… (`Ctrl+Shift
 
 \* Quick save's keyboard shortcut is currently non-functional — see [Known limitations](../README.md#known-limitations); the toolbar button works.
 
+## Recording
+
+Record screen takes a region or a window and writes an MP4. The overlay is the
+same one region capture uses, with two extra toggles on macOS for system audio
+and the microphone; the first time the microphone is used the OS asks for
+permission, and a denial is reported on the pill rather than producing a
+silently silent file.
+
+Once the region is confirmed the overlays come down and a pill appears below it
+with a running clock, a Stop and a Cancel. Stop keeps the recording and hands
+it to whatever "After capture" is set to; Cancel throws it away. A recording
+has to fit on one monitor — a region dragged across two is refused with an
+explanation.
+
+Frame rate, cursor visibility and the audio defaults live in Settings >
+Recording, along with how many recordings capture history keeps (counted
+separately from screenshots, since each one is orders of magnitude larger).
+
+## Video editor
+
+A finished recording opens here. It streams rather than loading whole, so
+seeking in a long clip is immediate.
+
+**The timeline** runs along the bottom: click anywhere to seek, drag either
+handle to trim. The excluded ranges dim, and the duration under the clip shows
+what the export will actually be — including the speed change.
+
+**Speed** is 0.5x to 4x, applied to both preview and export. On macOS the audio
+is time-stretched with pitch correction, so a 2x clip still sounds like speech;
+the other platforms export silent video at any speed but 1x.
+
+**The tools** are the image editor's, minus the ones that read pixels from a
+still frame (eyedropper, extract text, loupe, measure) — those have no meaning
+against a clip whose pixels change under them. Crop marks the region to export
+rather than re-encoding as you drag it. Censors are the one annotation that is
+not flattened into a single overlay image: they are re-applied to every frame,
+because a censor baked from one paused frame would show that frame's pixels
+forever while the video moved underneath it.
+
+**The export bar** mirrors the image editor's: Show in folder, Copy file,
+Upload, Discard, Save As and Quick save, with MP4 or GIF chosen next to the
+speed control. Copy file puts the *file* on the clipboard rather than its
+contents — pasting into Finder or Explorer makes a copy, pasting into a message
+attaches it — and it exports the trim first, so what you copy is what you would
+have saved. Upload is hidden for hosts that reject video (imgur, imgbb).
+
+GIFs are capped to the max width in Settings and have no sound.
+
 ## Pin to screen
 
 Floats the current selection as an always-on-top window, for comparing a capture against what's underneath it: drag to move, scroll wheel to resize, `Esc` to close.

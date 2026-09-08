@@ -497,6 +497,19 @@ char *tas_record_stop(void *session, char **err_out) {
                 return NULL;
             }
 
+            // Hold the last frame to the moment recording actually stopped.
+            //
+            // ScreenCaptureKit emits a frame only when the screen changes, so
+            // a still region produces almost none and the file would otherwise
+            // end at whenever the last one happened to arrive: a 2-second
+            // recording of a static area came out 100ms long. Both PTS come
+            // from the host clock, so "now" is directly comparable to them.
+            CMTime endAt = CMClockGetTime(CMClockGetHostTimeClock());
+            if (CMTIME_IS_NUMERIC(endAt) &&
+                CMTIME_COMPARE_INLINE(endAt, >, rec.firstPTS)) {
+                [rec.writer endSessionAtSourceTime:endAt];
+            }
+
             [rec.videoInput markAsFinished];
             [rec.systemAudioInput markAsFinished];
             [rec.micInput markAsFinished];
