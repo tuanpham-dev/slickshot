@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Check, X } from "lucide-react";
+import { useWindowDrag } from "../lib/useWindowDrag";
 import { Button } from "../ui/Button";
 import { onScrollProgress, scrollCancel, scrollStop } from "../lib/ipc";
 
@@ -8,6 +9,7 @@ import { onScrollProgress, scrollCancel, scrollStop } from "../lib/ipc";
  * a region filling the monitor leaves nowhere to put this that isn't over the
  * content, so it has to be movable. */
 export function ScrollControl() {
+  const drag = useWindowDrag();
   const [height, setHeight] = useState(0);
   const [frames, setFrames] = useState(0);
   const [ending, setEnding] = useState(false);
@@ -38,10 +40,13 @@ export function ScrollControl() {
 
   return (
     <div
-      data-tauri-drag-region
+      {...drag}
       className="flex items-center justify-between gap-2 h-full w-full px-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-lg)] select-none cursor-move"
     >
-      <div data-tauri-drag-region className="flex flex-col min-w-0">
+      {/* Inert to the pointer so a press on the text still reaches the drag
+          region: Tauri tests the event's own target for the attribute rather
+          than walking up to an ancestor. */}
+      <div data-tauri-drag-region className="flex flex-col min-w-0 pointer-events-none">
         <span className="text-xs font-medium text-[var(--fg)]">
           {ending ? "Finishing…" : "Scrolling…"}
         </span>

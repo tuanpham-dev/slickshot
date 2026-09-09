@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { Mic, Square, Volume2, X } from "lucide-react";
+import { useWindowDrag } from "../lib/useWindowDrag";
 import { Button } from "../ui/Button";
 import { onRecordProgress, onRecordWarning, recordCancel, recordStop } from "../lib/ipc";
 
@@ -19,6 +20,7 @@ interface RecordControlProps {
  * and offer the two ways out. Draggable for the same reason too: a region
  * filling the monitor leaves nowhere to put this that isn't over the content. */
 export function RecordControl({ params }: RecordControlProps) {
+  const drag = useWindowDrag();
   const [elapsed, setElapsed] = useState(0);
   const [ending, setEnding] = useState(false);
   const [warning, setWarning] = useState<string | null>(null);
@@ -54,10 +56,15 @@ export function RecordControl({ params }: RecordControlProps) {
 
   return (
     <div
-      data-tauri-drag-region
+      {...drag}
       className="flex items-center justify-between gap-2 h-full w-full px-3 rounded-[var(--radius-md)] border border-[var(--border)] bg-[var(--surface)] shadow-[var(--shadow-lg)] select-none cursor-move"
     >
-      <div data-tauri-drag-region className="flex flex-col min-w-0">
+      {/* `pointer-events-none` on the text, not just the drag attribute on
+          its parents: Tauri's drag handler tests the event's own target for
+          `data-tauri-drag-region`, and does not walk up to an ancestor. A
+          press that landed on the label or the clock therefore hit a <span>
+          with no attribute, and the pill would not move. */}
+      <div data-tauri-drag-region className="flex flex-col min-w-0 pointer-events-none">
         <span className="flex items-center gap-1.5 text-xs font-medium text-[var(--fg)]">
           {!ending && (
             <span

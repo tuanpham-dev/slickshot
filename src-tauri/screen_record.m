@@ -1331,3 +1331,23 @@ bool tas_clipboard_copy_file(const char *path, char **err_out) {
         return true;
     }
 }
+
+// Keeps a window out of every screen capture on the machine -- ours included.
+//
+// The recording pill has to sit on top of what is being recorded, and when the
+// region fills the screen there is nowhere to put it that is outside. Scrolling
+// capture solves that by hiding the pill for each grab, which a continuous
+// recording cannot do. `NSWindowSharingNone` is the system's own answer: the
+// window is composited for the user and skipped by ScreenCaptureKit, which is
+// how password managers stay out of screen shares.
+void tas_window_exclude_from_capture(void *ns_window) {
+    if (!ns_window) {
+        return;
+    }
+    @autoreleasepool {
+        NSWindow *window = (__bridge NSWindow *)ns_window;
+        if ([window respondsToSelector:@selector(setSharingType:)]) {
+            window.sharingType = NSWindowSharingNone;
+        }
+    }
+}

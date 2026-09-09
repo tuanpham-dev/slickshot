@@ -153,6 +153,12 @@ Paste the first 20 lines of any compiler error; the fixes belong in T5.1/T5.2.
       or the timestamps are wrong
 - [ ] Recording with an audio toggle on shows the "audio isn't available on
       this platform" warning rather than silently producing a silent file
+- [ ] **The pill is not in the recording.** macOS keeps it out with
+      `NSWindowSharingNone`; neither Windows nor Linux has an equivalent that
+      reaches `xcap`'s whole-monitor grab, so the pill is expected to appear in
+      the video there. Confirm whether it does, and how badly it gets in the
+      way on a full-screen recording
+- [ ] The pill can be dragged by its text, not just its edges
 - [ ] `slickshot record --duration 5 -o clip.mp4` works headlessly
 
 ### 2. The editor

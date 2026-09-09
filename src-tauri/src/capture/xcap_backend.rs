@@ -58,6 +58,11 @@ impl ScreenCapturer for XcapCapturer {
         Ok(image)
     }
 
+    /// Windows in front-to-back order, which is what every backend's
+    /// underlying enumeration already gives (CGWindowList on macOS,
+    /// EnumWindows on Windows, the X stacking order on Linux) and what the
+    /// overlay's window picker relies on to pick the *frontmost* window under
+    /// the cursor rather than whichever happens to be smallest.
     fn windows(&self) -> CaptureResult<Vec<WindowInfo>> {
         platform::windows()
     }
@@ -309,3 +314,4 @@ mod live_tests {
         }
     }
 }
+

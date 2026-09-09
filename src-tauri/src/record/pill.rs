@@ -17,6 +17,38 @@ pub const PILL_W: i32 = 260;
 pub const PILL_H: i32 = 64;
 const GAP_LOGICAL: i32 = 12;
 
+#[cfg(target_os = "macos")]
+extern "C" {
+    fn tas_window_exclude_from_capture(ns_window: *mut std::ffi::c_void);
+}
+
+/// Keeps the pill out of screen captures, including the recording it is
+/// reporting on.
+///
+/// It has to sit above what is being recorded, and a region that fills the
+/// screen leaves nowhere outside to put it. Scrolling capture hides it for
+/// each grab; a continuous recording cannot. On macOS the window is simply
+/// marked unshareable. Windows and Linux have no equivalent that reaches
+/// `xcap`'s whole-monitor grab, so the pill is still captured there -- noted
+/// in the platform hand-off.
+fn exclude_from_capture(window: &WebviewWindow) {
+    #[cfg(target_os = "macos")]
+    {
+        // On the main thread, always. `record_start` is an async command, so
+        // this runs on a tokio worker by default -- and touching an NSWindow
+        // from there trapped inside AppKit's window manager and took the whole
+        // app down with it.
+        let window = window.clone();
+        let _ = window.clone().run_on_main_thread(move || {
+            if let Ok(ns_window) = window.ns_window() {
+                unsafe { tas_window_exclude_from_capture(ns_window) };
+            }
+        });
+    }
+    #[cfg(not(target_os = "macos"))]
+    let _ = window;
+}
+
 /// Builds and shows a pill window for `label`, anchored to `rect`.
 pub fn open_pill(
     app: &AppHandle,
@@ -61,6 +93,8 @@ pub fn open_pill(
     let _ = window.set_min_size(Some(Size::Physical(wanted)));
     let _ = window.set_max_size(Some(Size::Physical(wanted)));
     let _ = window.set_position(Position::Physical(control_position(app, rect, wanted)));
+    // Before it is shown, so it is never composited into a frame.
+    exclude_from_capture(&window);
     let _ = window.show();
     // Placed again against the size the toolkit actually gave us: `set_size`
     // is a request, and a window left larger than asked for would hang off

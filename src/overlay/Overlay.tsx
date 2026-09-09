@@ -45,6 +45,7 @@ import {
   type WindowInfo,
 } from "../lib/ipc";
 import { rectContains, rectFromPoints, rectIntersect, type PhysPoint, type PhysRect } from "../lib/geometry";
+import { windowAt } from "./windowPick";
 import { measurementLabel } from "../lib/color";
 import { ResultTabs, type ResultTab } from "../ui/ResultTabs";
 import { IconButton } from "../ui/IconButton";
@@ -829,13 +830,6 @@ export function Overlay({ params }: OverlayProps) {
 
   /** Smallest window whose bounds contain `p` -- smallest so a dialog on top
    * of its parent wins instead of the big window behind it. */
-  function windowAt(p: PhysPoint): WindowInfo | null {
-    return (
-      [...windows]
-        .filter((w) => rectContains(w.rect, p))
-        .sort((a, b) => a.rect.w * a.rect.h - b.rect.w * b.rect.h)[0] ?? null
-    );
-  }
 
   function handlePointerMove(e: React.PointerEvent) {
     const p = toPhys(e.clientX, e.clientY);
@@ -847,7 +841,7 @@ export function Overlay({ params }: OverlayProps) {
     }
 
     if (pickWindow) {
-      setHoveredWindow(windowAt(p));
+      setHoveredWindow(windowAt(windows, p));
       return;
     }
 
@@ -897,7 +891,7 @@ export function Overlay({ params }: OverlayProps) {
       // ordinary drag cannot jump to a window by accident.
       const canSnap =
         (liveMode || e.ctrlKey) && !(selection && rectContains(selection, p));
-      setHoveredWindow(canSnap ? windowAt(p) : null);
+      setHoveredWindow(canSnap ? windowAt(windows, p) : null);
     }
     if (mode === "draw") {
       const anchor = pressPointRef.current;
@@ -1017,7 +1011,7 @@ export function Overlay({ params }: OverlayProps) {
       const travelled =
         p && press ? Math.hypot(p.x - press.x, p.y - press.y) : Number.POSITIVE_INFINITY;
       if (p && travelled < CLICK_SLOP_PX) {
-        const hit = windowAt(p);
+        const hit = windowAt(windows, p);
         if (hit) {
           dragModeRef.current = null;
           dragOrigRectRef.current = null;
