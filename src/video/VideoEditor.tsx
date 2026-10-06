@@ -19,9 +19,11 @@ import {
   videoDiscard,
   videoProbe,
   videoReveal,
+  isLinux,
   isMac,
   videoThumbnails,
-  videoUrl,
+  playableVideoUrl,
+  videoFrame,
   type VideoInfo,
 } from "../lib/ipc";
 import { Timeline } from "./Timeline";
@@ -68,6 +70,7 @@ export function VideoEditor({ params }: VideoEditorProps) {
   // recording -- the hash param only covers a freshly built one.
   const [videoId, setVideoId] = useState<string | null>(params.get("video"));
   const [info, setInfo] = useState<VideoInfo | null>(null);
+  const [videoSrc, setVideoSrc] = useState<string | null>(null);
   const [trim, setTrim] = useState<Trim>({ start: 0, end: 0 });
   const [current, setCurrent] = useState(0);
   const [playing, setPlaying] = useState(false);
@@ -132,6 +135,33 @@ export function VideoEditor({ params }: VideoEditorProps) {
       );
   }, [videoId, toast]);
 
+  useEffect(() => {
+    if (!videoId) return;
+    let cancelled = false;
+    let url: string | null = null;
+    setVideoSrc(null);
+    playableVideoUrl(videoId)
+      .then((u) => {
+        url = u;
+        if (cancelled) {
+          if (u.startsWith("blob:")) URL.revokeObjectURL(u);
+          return;
+        }
+        setVideoSrc(u);
+      })
+      .catch((err) =>
+        toast.show({
+          kind: "error",
+          title: "Couldn't load that recording for playback",
+          description: String(err),
+        }),
+      );
+    return () => {
+      cancelled = true;
+      if (url?.startsWith("blob:")) URL.revokeObjectURL(url);
+    };
+  }, [videoId, toast]);
+
   // Playback stops at the trim's end rather than running to the end of the
   // file: the trimmed range is what the user is working on, so previewing
   // past it is just confusing.
@@ -171,16 +201,36 @@ export function VideoEditor({ params }: VideoEditorProps) {
   // The base canvas under the annotations holds the frame currently shown.
   // It stays hidden (the live <video> shows through) but has to exist and be
   // the right size, because the flatten step measures the overlay from it.
+  // Whether the frame under the annotations comes from the native decoder
+  // rather than from drawing the <video>. Always on Linux: WebKitGTK's GL
+  // video sink hands `createImageBitmap` either a transparent bitmap or
+  // uninitialised texture memory, and the latter can't be told from a real
+  // frame -- every censor and spotlight previewed against it. Elsewhere it
+  // switches on the first time a grab comes back empty.
+  const nativeFramesRef = useRef(isLinux);
   const grabFrame = useCallback(async () => {
     const video = videoRef.current;
-    if (!video || !video.videoWidth) return;
+    if (!video || !video.videoWidth || !videoId) return;
     try {
-      setBaseImage(await createImageBitmap(video));
+      if (!nativeFramesRef.current) {
+        const bitmap = await createImageBitmap(video);
+        if (!isBlankBitmap(bitmap)) {
+          setBaseImage(bitmap);
+          return;
+        }
+        bitmap.close();
+        nativeFramesRef.current = true;
+      }
+      const at = video.currentTime * 1000;
+      const frame = await videoFrame(videoId, at);
+      // A later seek may have landed while this one decoded.
+      if (Math.abs(video.currentTime * 1000 - at) > 1) return;
+      setBaseImage(await createImageBitmap(frame));
     } catch {
       // A frame that isn't decoded yet simply isn't grabbed; the next
       // seek or pause tries again.
     }
-  }, []);
+  }, [videoId]);
 
   // A recording is its display's full pixel size, which is larger than the
   // editor window on any Retina screen -- without this the clip opens at 1:1
@@ -394,7 +444,9 @@ export function VideoEditor({ params }: VideoEditorProps) {
 
   return (
     <div className="flex flex-col h-screen bg-[var(--bg)] text-[var(--fg)]">
-      <div className="flex items-center gap-3 px-3 h-12 border-b border-[var(--border)] bg-[var(--surface)]">
+      {/* Wraps rather than clipping: tools, speed, format and the effect
+          buttons together are wider than a small or HiDPI-scaled window. */}
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 px-3 py-1.5 min-h-12 border-b border-[var(--border)] bg-[var(--surface)]">
         <VideoToolbar tool={tool} onToolChange={setTool} />
         <div className="w-px h-5 bg-[var(--border)]" />
         <span className="text-xs text-[var(--fg-muted)]">Speed</span>
@@ -457,7 +509,7 @@ export function VideoEditor({ params }: VideoEditorProps) {
             underlay={
               <video
                 ref={attachVideo}
-                src={videoUrl(videoId)}
+                src={videoSrc ?? undefined}
                 className="w-full h-full"
                 // Mirrors the export's punch-in, so the framing you set is
                 // the framing you get.
@@ -602,4 +654,19 @@ export function VideoEditor({ params }: VideoEditorProps) {
       />
     </div>
   );
+}
+
+/** Whether a grabbed frame came back with nothing in it. A decoded video
+ * frame is opaque everywhere, so a sparse sample that is entirely
+ * transparent means the grab failed rather than the picture being empty. */
+function isBlankBitmap(bitmap: ImageBitmap): boolean {
+  const canvas = document.createElement("canvas");
+  canvas.width = 8;
+  canvas.height = 8;
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return false;
+  ctx.drawImage(bitmap, 0, 0, 8, 8);
+  const data = ctx.getImageData(0, 0, 8, 8).data;
+  for (let i = 3; i < data.length; i += 4) if (data[i] !== 0) return false;
+  return true;
 }

@@ -141,6 +141,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             video::video_upload_supported,
             video::record_engine_status,
             video::video_thumbnails,
+            video::video_frame,
             video::video_export_prepare,
             video::video_export,
             scroll::scroll_start,
@@ -202,6 +203,7 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
             }
 
             let main = app.get_webview_window("main").expect("main window must exist");
+            fit_main_to_screen(&main);
             match cli_command {
                 // A CLI intent (cold-started region/window/open) triggers
                 // its capture instead of showing the main window; the app
@@ -232,4 +234,28 @@ pub fn run(cli_command: Option<cli::CliCommand>) {
     builder
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+/// Shortens the main window on a screen too small for its fixed height, so
+/// its bottom isn't cut off. The tiles scroll inside it, so a shorter window
+/// loses nothing. Only ever shrinks: the configured size is the design.
+fn fit_main_to_screen(window: &tauri::WebviewWindow) {
+    let Some(monitor) = window
+        .current_monitor()
+        .ok()
+        .flatten()
+        .or_else(|| window.primary_monitor().ok().flatten())
+    else {
+        return;
+    };
+    let scale = monitor.scale_factor();
+    // Room for the title bar the WM adds, which work_area doesn't know about.
+    const DECORATION: f64 = 48.0;
+    let available = monitor.work_area().size.height as f64 / scale - DECORATION;
+    let Ok(size) = window.inner_size() else { return };
+    let size = size.to_logical::<f64>(scale);
+    if size.height > available {
+        let _ = window.set_size(tauri::LogicalSize::new(size.width, available.max(320.0)));
+        let _ = window.center();
+    }
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { rectContains, rectFromPoints, rectIntersect } from "./geometry";
+import { rectContains, rectFromPoints, rectIntersect, selectionMonitors } from "./geometry";
 
 describe("rectFromPoints", () => {
   it("normalizes a rect dragged from bottom-right to top-left", () => {
@@ -70,5 +70,28 @@ describe("rectIntersect", () => {
     const a = { x: 0, y: 0, w: 10, h: 10 };
     const b = { x: 5, y: 5, w: 10, h: 10 };
     expect(rectIntersect(a, b)).toEqual(rectIntersect(b, a));
+  });
+});
+
+describe("selectionMonitors", () => {
+  const left = { id: 1, rect: { x: 0, y: 0, w: 1920, h: 1200 } };
+  const right = { id: 2, rect: { x: 1920, y: 176, w: 1280, h: 1024 } };
+
+  it("gives a selection on one monitor to that monitor alone", () => {
+    const r = selectionMonitors({ x: 2100, y: 350, w: 800, h: 500 }, [left, right]);
+    expect(r.owner?.id).toBe(2);
+    expect(r.overlapping.map((m) => m.id)).toEqual([2]);
+  });
+
+  it("gives a straddling selection to the side holding more of it", () => {
+    const r = selectionMonitors({ x: 1500, y: 400, w: 800, h: 400 }, [left, right]);
+    expect(r.owner?.id).toBe(1);
+    expect(r.overlapping).toHaveLength(2);
+  });
+
+  it("has no owner off every monitor", () => {
+    const r = selectionMonitors({ x: 1950, y: 0, w: 50, h: 100 }, [left, right]);
+    expect(r.owner).toBeNull();
+    expect(r.overlapping).toHaveLength(0);
   });
 });

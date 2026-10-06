@@ -41,6 +41,15 @@ export class IpcError extends Error {
   }
 }
 
+/** An error as a sentence for the UI: the message alone, without the
+ * `IpcError:` name `String(err)` puts in front, or the Rust error's
+ * "capture failed:"-style category prefix. */
+export function errorText(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const bare = message.replace(/^[a-z ]+ (failed|error): /i, "");
+  return bare.charAt(0).toUpperCase() + bare.slice(1);
+}
+
 async function call<T>(command: string, args?: Record<string, unknown>): Promise<T> {
   try {
     return await invoke<T>(command, args);
@@ -654,6 +663,16 @@ export async function videoExport(overlayPng: Uint8Array): Promise<VideoExportRe
 export const videoThumbnails = (id: string, count: number, height: number) =>
   call<string[]>("video_thumbnails", { id, count, height });
 
+/** One decoded frame at `atMs`, straight from the native decoder -- the
+ * fallback for when drawing the `<video>` itself yields nothing. */
+export async function videoFrame(id: string, atMs: number): Promise<ImageData> {
+  const buf = await call<ArrayBuffer>("video_frame", { id, atMs: Math.max(0, Math.round(atMs)) });
+  const head = new DataView(buf, 0, 8);
+  const width = head.getUint32(0, true);
+  const height = head.getUint32(4, true);
+  return new ImageData(new Uint8ClampedArray(buf, 8, width * height * 4), width, height);
+}
+
 /** Copies the *prepared* export, so a trimmed, annotated clip copies as it
  * would save. Call `videoExportPrepare` first, exactly as Save As does; the
  * body is the overlay PNG. */
@@ -689,6 +708,18 @@ export function videoUrl(id: string): string {
   return convertFileSrc(id, "slickshot-video");
 }
 
+/** A `<video>` src for a recording. On Linux, WebKitGTK's media stack only
+ * loads http(s), file and blob URLs -- a custom scheme fails at once with a
+ * FormatError -- so the file is fetched through the protocol and handed over
+ * as a blob. The caller revokes the returned URL when it is done with it. */
+export async function playableVideoUrl(id: string): Promise<string> {
+  if (!isLinux) return videoUrl(id);
+  const res = await fetch(videoUrl(id));
+  if (!res.ok) throw new Error(`loading the recording failed: ${res.status}`);
+  const blob = await res.blob();
+  return URL.createObjectURL(new Blob([blob], { type: "video/mp4" }));
+}
+
 export function onVideoEditorOpen(cb: (id: string) => void): Promise<UnlistenFn> {
   return listen<string>("video-editor:open", (e) => cb(e.payload));
 }
@@ -698,6 +729,7 @@ export function onVideoEditorOpen(cb: (id: string) => void): Promise<UnlistenFn>
  * user agent is the only signal available inside the webview; Tauri's own
  * platform API is async and these are needed during render. */
 export const isMac = /Mac|iPhone|iPad/.test(navigator.userAgent);
+export const isLinux = /Linux/.test(navigator.userAgent) && !/Android/.test(navigator.userAgent);
 
 export function parseHashRoute(): { route: string; params: URLSearchParams } {
   const hash = window.location.hash.replace(/^#/, "");

@@ -501,14 +501,15 @@ impl VideoBackend for WindowsBackend {
         // need a pitch-corrected time-stretch Media Foundation has no simple
         // equivalent of, so the macOS-only note in the docs covers this too.
         let start = opts.range.start_ms;
-        let speed = opts.speed.max(0.01) as f64;
         let mut failure: Option<String> = None;
 
         self.decode_frames(src, opts.range, 0, &mut |frame| {
-            let out_pts = ((frame.pts_ms.saturating_sub(start)) as f64 / speed) as u64;
+            // Trim-relative *source* time: the caller maps it onto the output
+            // timeline itself (speed, cuts, freezes) and hands back the pts to
+            // encode at. Scaling by speed here as well applied it twice.
             let Some(processed) = process(RgbaFrame {
                 image: frame.image,
-                pts_ms: out_pts,
+                pts_ms: frame.pts_ms.saturating_sub(start),
             }) else {
                 return true;
             };

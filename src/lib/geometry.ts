@@ -30,3 +30,28 @@ export function rectIntersect(a: PhysRect, b: PhysRect): PhysRect | null {
   if (right <= x || bottom <= y) return null;
   return { x, y, w: right - x, h: bottom - y };
 }
+
+/** Which of `monitors` a selection lives on: every monitor it overlaps, and
+ * the one holding the largest share of it. With one overlay window per
+ * monitor, the owner is the single window that draws the selection's chrome
+ * (size readout, confirm/cancel) -- otherwise a region straddling a seam got
+ * a set on each side. */
+export function selectionMonitors<M extends { id: number; rect: PhysRect }>(
+  selection: PhysRect,
+  monitors: readonly M[],
+): { owner: M | null; overlapping: M[] } {
+  let owner: M | null = null;
+  let best = 0;
+  const overlapping: M[] = [];
+  for (const m of monitors) {
+    const part = rectIntersect(selection, m.rect);
+    if (!part) continue;
+    overlapping.push(m);
+    const area = part.w * part.h;
+    if (area > best) {
+      best = area;
+      owner = m;
+    }
+  }
+  return { owner, overlapping };
+}

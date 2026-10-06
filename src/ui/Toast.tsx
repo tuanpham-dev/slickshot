@@ -1,5 +1,5 @@
 import { Toast as RadixToast } from "radix-ui";
-import { createContext, useCallback, useContext, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle2, XCircle, X } from "lucide-react";
 
 export type ToastKind = "success" | "error" | "info";
@@ -44,8 +44,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
+  // Memoised so consumers can list `toast` in effect deps: a fresh object per
+  // render would re-run them every time a toast appeared or went away -- which
+  // in the Video Editor reset the trim and effects.
+  const value = useMemo(() => ({ show }), [show]);
+
   return (
-    <ToastContext.Provider value={{ show }}>
+    <ToastContext.Provider value={value}>
       <RadixToast.Provider swipeDirection="right" duration={3000}>
         {children}
         {toasts.map((t) => (

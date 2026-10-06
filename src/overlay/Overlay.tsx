@@ -7,6 +7,7 @@ import {
 } from "@tauri-apps/plugin-notification";
 import { Check, Copy, Download, Loader2, Mic, Pencil, Pin as PinIcon, Volume2, X } from "lucide-react";
 import {
+  errorText,
   listMonitors,
   listWindows,
   onSelectionChanged,
@@ -44,7 +45,14 @@ import {
   type MonitorInfo,
   type WindowInfo,
 } from "../lib/ipc";
-import { rectContains, rectFromPoints, rectIntersect, type PhysPoint, type PhysRect } from "../lib/geometry";
+import {
+  rectContains,
+  rectFromPoints,
+  rectIntersect,
+  selectionMonitors,
+  type PhysPoint,
+  type PhysRect,
+} from "../lib/geometry";
 import { windowAt } from "./windowPick";
 import { measurementLabel } from "../lib/color";
 import { ResultTabs, type ResultTab } from "../ui/ResultTabs";
@@ -165,6 +173,7 @@ export function Overlay({ params }: OverlayProps) {
   const frameCanvasRef = useRef<HTMLCanvasElement>(null);
   const annotationCanvasRef = useRef<HTMLCanvasElement>(null);
   const [monitor, setMonitor] = useState<MonitorInfo | null>(null);
+  const [allMonitors, setAllMonitors] = useState<MonitorInfo[]>([]);
   const [frame, setFrame] = useState<OverlayFrame | null>(null);
   const [selection, setSelection] = useState<PhysRect | null>(null);
   const [windows, setWindows] = useState<WindowInfo[]>([]);
@@ -291,7 +300,10 @@ export function Overlay({ params }: OverlayProps) {
   );
 
   useEffect(() => {
-    listMonitors().then((all) => setMonitor(all.find((m) => m.id === monitorId) ?? null));
+    listMonitors().then((all) => {
+      setAllMonitors(all);
+      setMonitor(all.find((m) => m.id === monitorId) ?? null);
+    });
   }, [monitorId]);
 
   // The overlay window is pre-warmed and reused across captures (see
@@ -1111,7 +1123,7 @@ export function Overlay({ params }: OverlayProps) {
         return;
       }
       if (e.key === "Enter" && !pickWindow && !translateMode) {
-        handleConfirm();
+        handleConfirmRef.current();
       }
     }
     // Letting go of Ctrl without moving the pointer has to drop the snap
@@ -1162,6 +1174,17 @@ export function Overlay({ params }: OverlayProps) {
   // handles, and a confirm/cancel pair -- so a mis-drawn region doesn't
   // require starting over, and confirming doesn't require the keyboard.
   const editable = sel !== null && dragMode !== "draw";
+
+  // A selection straddling a seam is drawn by every overlay it touches, but
+  // its size readout and buttons belong to one of them -- the monitor holding
+  // most of it. Until the monitor list arrives every overlay draws them, as
+  // before this existed.
+  const placement = selection ? selectionMonitors(selection, allMonitors) : null;
+  const ownsChrome = !placement?.owner || placement.owner.id === monitor?.id;
+  // A recording covers one monitor, so a region across several is refused.
+  // Said up front on every overlay it touches, rather than as an error from
+  // Rust after Enter -- which only the overlay that took the key ever showed.
+  const spansMonitors = recordMode && (placement?.overlapping.length ?? 0) > 1;
 
   // Virtual-screen coordinate -> fraction of this monitor's width/height,
   // the same normalization `sel` does, for chrome positioned by absolute
@@ -1281,7 +1304,14 @@ export function Overlay({ params }: OverlayProps) {
   /** Confirms the capture, baking in any annotations. With none drawn this is
    * byte-for-byte the original path: Rust composites from the frozen session
    * and nothing round-trips through the webview. */
+  // The keydown listener only re-subscribes on its own deps, not on every
+  // selection change, so it reaches the current handleConfirm through this --
+  // calling it directly would confirm a stale, usually null, selection.
+  const handleConfirmRef = useRef(handleConfirm);
+  handleConfirmRef.current = handleConfirm;
+
   async function handleConfirm(dest: ConfirmDest = "default") {
+    if (spansMonitors) return;
     const rect = selection;
     setSelection(null);
     try {
@@ -1300,7 +1330,7 @@ export function Overlay({ params }: OverlayProps) {
             // without this the user is silently back at "pick a window" with
             // no idea why.
             setSelection(rect);
-            setStartError(String(err));
+            setStartError(errorText(err));
             return;
           }
         }
@@ -1406,6 +1436,7 @@ export function Overlay({ params }: OverlayProps) {
                   cursor: editable && !activeTool ? "move" : "crosshair",
                 }}
               />
+              {ownsChrome && (
               <span
                 className="absolute flex items-center gap-1 text-[11px] font-mono bg-[var(--fg)] text-[var(--bg)] px-1.5 py-0.5 rounded-[3px]"
                 style={{
@@ -1452,6 +1483,7 @@ export function Overlay({ params }: OverlayProps) {
                   </>
                 )}
               </span>
+              )}
               {editable &&
                 HANDLES.map(({ id, xFrac, yFrac, cursor }) => (
                   <div
@@ -1498,7 +1530,7 @@ export function Overlay({ params }: OverlayProps) {
         </div>
       )}
 
-      {editable && sel && !translateMode && (
+      {editable && sel && ownsChrome && !translateMode && (
         <div
           className="absolute flex items-center gap-2 cursor-default"
           // Stops the pointerdown from bubbling to the container's handler,
@@ -1602,6 +1634,7 @@ export function Overlay({ params }: OverlayProps) {
             variant="primary"
             size="md"
             className="shadow-[var(--shadow-md)]"
+            disabled={spansMonitors}
             onClick={() => handleConfirm()}
           />
         </div>
@@ -1844,7 +1877,9 @@ export function Overlay({ params }: OverlayProps) {
 
       {imageId && (
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 text-[11px] text-[var(--bg)] bg-[var(--fg)]/80 px-3 py-1.5 rounded-full pointer-events-none">
-          {startError
+          {spansMonitors
+            ? "A recording has to fit on one monitor -- move the selection onto one · Esc to cancel"
+            : startError
             ? `${startError} · Esc to cancel`
             : pickWindow
             ? "Click a window to capture it · Esc to cancel"

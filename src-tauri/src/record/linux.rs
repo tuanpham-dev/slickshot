@@ -21,8 +21,6 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 #[cfg(target_os = "linux")]
 use image::RgbaImage;
-#[cfg(target_os = "linux")]
-use super::transform::{self, FramePacer};
 
 use super::{
     ActiveRecording, RecordConfig, RecordError, RecordResult, RgbaFrame, TimeRange,
@@ -45,8 +43,36 @@ pub struct EngineStatus {
     pub reason: String,
 }
 
-/// The H.264 encoders this looks for, best first.
-const ENCODERS: [&str; 3] = ["vaapih264enc", "x264enc", "openh264enc"];
+/// An H.264 encoder this can record with.
+struct Encoder {
+    name: &'static str,
+    /// The element as it goes into a launch description.
+    launch: &'static str,
+    /// The raw format it is fed. Always 4:2:0: left to negotiate, x264enc
+    /// takes RGBA as Y444 and writes High 4:4:4, which openh264, VA-API,
+    /// browsers and most players refuse -- the editor's own preview included.
+    /// The VA encoders only accept NV12.
+    format: &'static str,
+    /// Hardware encoders are probed before use: the element being registered
+    /// says nothing about whether this GPU and driver can actually encode.
+    hardware: bool,
+}
+
+/// The encoders this looks for, best first. `vah264enc` is the current VA
+/// plugin; `vaapih264enc` is the older gstreamer-vaapi one it replaced, still
+/// what some distributions ship. x264enc is tuned for low latency because
+/// this is a live capture, not a file conversion.
+const ENCODERS: [Encoder; 4] = [
+    Encoder { name: "vah264enc", launch: "vah264enc", format: "NV12", hardware: true },
+    Encoder { name: "vaapih264enc", launch: "vaapih264enc", format: "NV12", hardware: true },
+    Encoder {
+        name: "x264enc",
+        launch: "x264enc speed-preset=veryfast tune=zerolatency",
+        format: "I420",
+        hardware: false,
+    },
+    Encoder { name: "openh264enc", launch: "openh264enc", format: "I420", hardware: false },
+];
 
 #[cfg(target_os = "linux")]
 pub fn engine_status() -> EngineStatus {
@@ -60,8 +86,8 @@ pub fn engine_status() -> EngineStatus {
     if found.is_empty() {
         return EngineStatus {
             available: false,
-            reason: "No H.264 encoder found. Install gstreamer1.0-plugins-ugly (x264) or \
-                     gstreamer1.0-vaapi for hardware encoding."
+            reason: "No H.264 encoder found. Install gstreamer1.0-plugins-ugly (x264), or \
+                     the VA plugin (gstreamer1.0-plugins-bad) for hardware encoding."
                 .into(),
         };
     }
@@ -79,14 +105,135 @@ pub fn engine_status() -> EngineStatus {
     }
 }
 
+/// The encoders that are installed and, for hardware ones, actually work.
+/// Worked out once: the probe starts a pipeline per hardware encoder.
 #[cfg(target_os = "linux")]
 fn available_encoders() -> Vec<&'static str> {
-    let registry = gst::Registry::get();
-    ENCODERS
-        .iter()
-        .filter(|name| registry.find_feature(name, gst::ElementFactory::static_type()).is_some())
-        .copied()
-        .collect()
+    static FOUND: std::sync::OnceLock<Vec<&'static str>> = std::sync::OnceLock::new();
+    FOUND
+        .get_or_init(|| {
+            let registry = gst::Registry::get();
+            ENCODERS
+                .iter()
+                .filter(|e| {
+                    registry
+                        .find_feature(e.name, gst::ElementFactory::static_type())
+                        .is_some()
+                })
+                .filter(|e| !e.hardware || encoder_works(e))
+                .map(|e| e.name)
+                .collect()
+        })
+        .clone()
+}
+
+/// Encodes a few test frames through `encoder`. A VA encoder registers
+/// whenever a VA device exists, including one whose driver has no H.264
+/// encode entrypoint -- and that only shows up as an error mid-recording.
+#[cfg(target_os = "linux")]
+fn encoder_works(encoder: &Encoder) -> bool {
+    let desc = format!(
+        "videotestsrc num-buffers=3 ! video/x-raw,format={},width=320,height=240,framerate=30/1 \
+         ! {} ! h264parse ! fakesink",
+        encoder.format, encoder.launch
+    );
+    let Ok(pipeline) = gst::parse::launch(&desc) else {
+        return false;
+    };
+    if pipeline.set_state(gst::State::Playing).is_err() {
+        let _ = pipeline.set_state(gst::State::Null);
+        return false;
+    }
+    let mut ok = false;
+    if let Some(bus) = pipeline.bus() {
+        for msg in bus.iter_timed(gst::ClockTime::from_seconds(5)) {
+            match msg.view() {
+                gst::MessageView::Eos(_) => {
+                    ok = true;
+                    break;
+                }
+                gst::MessageView::Error(_) => break,
+                _ => {}
+            }
+        }
+    }
+    let _ = pipeline.set_state(gst::State::Null);
+    ok
+}
+
+/// Reads one screen region straight off the X server, in the server's own
+/// 32-bit BGRx layout.
+///
+/// Instead of `xcap`'s video recorder, which grabs the *whole monitor* in an
+/// unpaced loop, converts every pixel to RGBA and queues each frame on an
+/// unbounded channel: at 4K that is over 30MB a frame the recording then
+/// copied and cropped again, and when it fell behind the queue grew and the
+/// frames were stamped when they were read rather than when they were taken.
+#[cfg(target_os = "linux")]
+struct RegionGrabber {
+    conn: x11rb::rust_connection::RustConnection,
+    root: u32,
+    x: i16,
+    y: i16,
+    w: u16,
+    h: u16,
+}
+
+#[cfg(target_os = "linux")]
+impl RegionGrabber {
+    fn new(x: i32, y: i32, w: u32, h: u32) -> RecordResult<Self> {
+        use x11rb::connection::Connection;
+        use x11rb::protocol::xproto::ImageOrder;
+
+        let (conn, screen_num) =
+            x11rb::connect(None).map_err(|e| RecordError::Backend(e.to_string()))?;
+        let setup = conn.setup();
+        let screen = &setup.roots[screen_num];
+        // GetImage hands back the server's pixel layout as-is; BGRx is what
+        // every depth-24/32 TrueColor server in practice uses, and anything
+        // else would need a conversion this doesn't have.
+        let packed_32 = setup
+            .pixmap_formats
+            .iter()
+            .any(|f| f.depth == screen.root_depth && f.bits_per_pixel == 32);
+        if !matches!(screen.root_depth, 24 | 32)
+            || !packed_32
+            || setup.image_byte_order != ImageOrder::LSB_FIRST
+        {
+            return Err(RecordError::Unsupported(format!(
+                "recording needs a 24-bit little-endian display (this one is {}-bit)",
+                screen.root_depth
+            )));
+        }
+        let fits = x >= 0
+            && y >= 0
+            && x as i64 + w as i64 <= screen.width_in_pixels as i64
+            && y as i64 + h as i64 <= screen.height_in_pixels as i64;
+        if !fits {
+            return Err(RecordError::Backend("that region is off the screen".into()));
+        }
+        let root = screen.root;
+        Ok(Self {
+            conn,
+            root,
+            x: x as i16,
+            y: y as i16,
+            w: w as u16,
+            h: h as u16,
+        })
+    }
+
+    fn grab(&self) -> Option<Vec<u8>> {
+        use x11rb::protocol::xproto::{ConnectionExt as _, ImageFormat};
+
+        let reply = self
+            .conn
+            .get_image(ImageFormat::Z_PIXMAP, self.root, self.x, self.y, self.w, self.h, !0)
+            .ok()?
+            .reply()
+            .ok()?;
+        (reply.data.len() == self.w as usize * self.h as usize * 4).then_some(reply.data)
+    }
 }
 
 /// A recording in flight: the pipeline, plus the capture thread's stop flag.
@@ -168,6 +315,7 @@ impl VideoBackend for LinuxBackend {
             w,
             h,
             cfg.fps,
+            "BGRx",
             &cfg.out_path.to_string_lossy(),
             &available_encoders(),
         )
@@ -187,61 +335,53 @@ impl VideoBackend for LinuxBackend {
             .set_state(gst::State::Playing)
             .map_err(|e| RecordError::Backend(e.to_string()))?;
 
-        let monitors = xcap::Monitor::all().map_err(|e| RecordError::Backend(e.to_string()))?;
-        let monitor = monitors
-            .into_iter()
-            .find(|m| m.id().map(|id| id == cfg.monitor_id).unwrap_or(false))
-            .ok_or_else(|| RecordError::Backend("that monitor is gone".into()))?;
+        // Opened here rather than on the capture thread so a display that
+        // can't be read fails the start, instead of leaving an empty file.
+        let grabber = match RegionGrabber::new(cfg.rect.x, cfg.rect.y, w, h) {
+            Ok(g) => g,
+            Err(e) => {
+                let _ = pipeline.set_state(gst::State::Null);
+                return Err(e);
+            }
+        };
 
         let running = Arc::new(AtomicBool::new(true));
         let started = Instant::now();
 
-        // Where in the monitor the region sits. `rect` is global physical
-        // pixels, the monitor's own origin is too, so this is a subtraction --
-        // no scale factor involved, unlike the macOS path.
-        let origin_x = cfg.rect.x - monitor.x().unwrap_or(0);
-        let origin_y = cfg.rect.y - monitor.y().unwrap_or(0);
-        let crop = crate::geometry::PhysRect::new(origin_x, origin_y, w, h);
-
         let src = appsrc.clone();
         let flag = running.clone();
-        let fps = cfg.fps;
+        let interval = Duration::from_secs_f64(1.0 / cfg.fps.max(1) as f64);
         let capture = std::thread::spawn(move || {
-            let Ok((recorder, frames)) = monitor.video_recorder() else {
-                return;
-            };
-            if recorder.start().is_err() {
-                return;
-            }
-            let mut pacer = FramePacer::new(fps);
-            for frame in frames {
-                if !flag.load(Ordering::SeqCst) {
-                    break;
-                }
-                let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
-                if !pacer.accept(elapsed_ms) {
+            // Paced here, one grab per slot, and stamped with when the grab
+            // happened. A slot the grab overran is skipped rather than caught
+            // up on, so a slow machine records at a lower rate with correct
+            // timing instead of queueing frames and drifting behind.
+            let mut next = started;
+            while flag.load(Ordering::SeqCst) {
+                let now = Instant::now();
+                if now < next {
+                    std::thread::sleep(next - now);
                     continue;
                 }
-                let Some(image) =
-                    RgbaImage::from_raw(frame.width, frame.height, frame.raw.clone())
-                else {
+                let pts = started.elapsed();
+                let Some(pixels) = grabber.grab() else {
+                    next += interval;
                     continue;
                 };
-                let cropped = transform::crop(&image, crop);
-                if cropped.dimensions() != (w, h) {
-                    continue;
-                }
-
-                let mut buffer = gst::Buffer::from_mut_slice(cropped.into_raw());
-                {
-                    let buf = buffer.get_mut().expect("sole owner");
-                    buf.set_pts(gst::ClockTime::from_mseconds(elapsed_ms as u64));
-                }
+                let mut buffer = gst::Buffer::from_mut_slice(pixels);
+                buffer
+                    .get_mut()
+                    .expect("sole owner")
+                    .set_pts(gst::ClockTime::from_nseconds(pts.as_nanos() as u64));
                 if src.push_buffer(buffer).is_err() {
                     break;
                 }
+                next += interval;
+                let after = Instant::now();
+                while next < after {
+                    next += interval;
+                }
             }
-            let _ = recorder.stop();
         });
 
         Ok(Box::new(LinuxRecording {
@@ -251,7 +391,7 @@ impl VideoBackend for LinuxBackend {
             started,
             out_path: cfg.out_path.clone(),
             capture: Some(capture),
-            // Neither audio nor the cursor is drawn by xcap's Linux recorder.
+            // Audio has no Linux path, and X11's GetImage doesn't draw the cursor.
             warnings: if cfg.system_audio || cfg.microphone {
                 vec!["Audio recording isn't available on Linux -- recording video only.".into()]
             } else {
@@ -267,7 +407,6 @@ impl VideoBackend for LinuxBackend {
 
     #[cfg(target_os = "linux")]
     fn probe(&self, path: &Path) -> RecordResult<VideoInfo> {
-        use gstreamer_pbutils::prelude::*;
         gst::init().map_err(|e| RecordError::Backend(e.to_string()))?;
         let uri = uri_for(path)?;
         let discoverer = gstreamer_pbutils::Discoverer::new(gst::ClockTime::from_seconds(10))
@@ -432,6 +571,7 @@ impl VideoBackend for LinuxBackend {
             out_w,
             out_h,
             30,
+            "RGBA",
             &dst.to_string_lossy(),
             &available_encoders(),
         )
@@ -455,13 +595,14 @@ impl VideoBackend for LinuxBackend {
         // would need a pitch-corrected time-stretch this platform has no
         // equivalent of. Documented as a macOS-only capability.
         let start = opts.range.start_ms;
-        let speed = opts.speed.max(0.01) as f64;
         let mut failed: Option<String> = None;
         self.decode_frames(src, opts.range, 0, &mut |frame| {
-            let out_pts = ((frame.pts_ms.saturating_sub(start)) as f64 / speed) as u64;
+            // Trim-relative *source* time: the caller maps it onto the output
+            // timeline itself (speed, cuts, freezes) and hands back the pts to
+            // encode at. Scaling by speed here as well applied it twice.
             let Some(processed) = process(RgbaFrame {
                 image: frame.image,
-                pts_ms: out_pts,
+                pts_ms: frame.pts_ms.saturating_sub(start),
             }) else {
                 return true;
             };
@@ -539,7 +680,11 @@ fn uri_for(path: &Path) -> RecordResult<String> {
     let absolute = path
         .canonicalize()
         .map_err(|e| RecordError::Backend(e.to_string()))?;
-    Ok(format!("file://{}", absolute.to_string_lossy()))
+    // Percent-encoded: the URI is spliced into a launch description, where a
+    // raw space would end it.
+    gst::glib::filename_to_uri(&absolute, None)
+        .map(|uri| uri.to_string())
+        .map_err(|e| RecordError::Backend(e.to_string()))
 }
 
 /// The pipeline a recording runs, as a `gst_parse_launch` description.
@@ -551,27 +696,39 @@ pub fn pipeline_description(
     w: u32,
     h: u32,
     fps: u32,
+    input: &str,
     out: &str,
     encoders_available: &[&str],
 ) -> Option<String> {
-    // Hardware first, then the two software encoders in the order they are
-    // usually preferred; x264enc is tuned for low latency because this is a
-    // live capture, not a file conversion.
-    const CANDIDATES: [(&str, &str); 3] = [
-        ("vaapih264enc", "vaapih264enc"),
-        ("x264enc", "x264enc speed-preset=veryfast tune=zerolatency"),
-        ("openh264enc", "openh264enc"),
-    ];
-    let encoder = CANDIDATES
+    // Best first: ENCODERS is in order of preference.
+    let encoder = ENCODERS
         .iter()
-        .find(|(name, _)| encoders_available.contains(name))
-        .map(|(_, launch)| *launch)?;
+        .find(|e| encoders_available.contains(&e.name))?;
 
+    // The queues put conversion and encoding on threads of their own, and
+    // videoconvert splits each frame across cores -- serially on one thread a
+    // 4K frame's conversion plus encode took longer than a frame lasts. The
+    // appsrc holds at most a few frames and blocks when full, so an encoder
+    // that still falls behind slows the capture loop (which then skips
+    // slots) instead of queueing frames without bound.
+    let max_bytes = 3 * w as u64 * h as u64 * 4;
     Some(format!(
-        "appsrc name=src is-live=true format=time \
-         caps=video/x-raw,format=RGBA,width={w},height={h},framerate={fps}/1 \
-         ! videoconvert ! {encoder} ! h264parse ! mp4mux ! filesink location={out}"
+        "appsrc name=src is-live=true format=time block=true max-bytes={max_bytes} \
+         caps=video/x-raw,format={input},width={w},height={h},framerate={fps}/1 \
+         ! queue ! videoconvert n-threads=0 ! video/x-raw,format={} ! queue ! {} \
+         ! h264parse ! mp4mux ! filesink location={}",
+        encoder.format,
+        encoder.launch,
+        parse_quoted(out)
     ))
+}
+
+/// A property value as `gst_parse_launch` reads it, double-quoted with its own
+/// quotes and backslashes escaped. Bare, a path with a space in it -- the
+/// default "SlickShot 2026-09-27 at 12.00.00.mp4" -- ends the value at the
+/// space, and the parser takes the date for the name of the next element.
+fn parse_quoted(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 #[cfg(test)]
@@ -580,30 +737,53 @@ mod tests {
 
     #[test]
     fn prefers_hardware_encoding_when_available() {
-        let desc = pipeline_description(1920, 1080, 30, "/tmp/a.mp4", &["x264enc", "vaapih264enc"])
+        let desc = pipeline_description(1920, 1080, 30, "RGBA", "/tmp/a.mp4", &["x264enc", "vaapih264enc"])
             .expect("a pipeline");
-        assert!(desc.contains("vaapih264enc"), "got {desc}");
+        assert!(desc.contains("format=NV12 ! queue ! vaapih264enc"), "got {desc}");
         assert!(!desc.contains("x264enc"), "hardware wins outright");
+    }
+
+    #[test]
+    fn prefers_the_current_va_plugin_over_the_old_one() {
+        let desc =
+            pipeline_description(1920, 1080, 30, "RGBA", "/tmp/a.mp4", &["vaapih264enc", "vah264enc"])
+                .expect("a pipeline");
+        assert!(desc.contains("format=NV12 ! queue ! vah264enc"), "got {desc}");
     }
 
     #[test]
     fn falls_back_through_the_software_encoders() {
         let desc =
-            pipeline_description(800, 600, 30, "/tmp/a.mp4", &["openh264enc"]).expect("a pipeline");
+            pipeline_description(800, 600, 30, "RGBA", "/tmp/a.mp4", &["openh264enc"]).expect("a pipeline");
         assert!(desc.contains("openh264enc"), "got {desc}");
     }
 
     #[test]
     fn no_encoder_means_no_pipeline() {
-        assert!(pipeline_description(800, 600, 30, "/tmp/a.mp4", &[]).is_none());
+        assert!(pipeline_description(800, 600, 30, "RGBA", "/tmp/a.mp4", &[]).is_none());
     }
 
     #[test]
     fn carries_the_capture_geometry_and_output() {
-        let desc = pipeline_description(1280, 720, 60, "/tmp/out.mp4", &["x264enc"]).unwrap();
+        let desc = pipeline_description(1280, 720, 60, "RGBA", "/tmp/out.mp4", &["x264enc"]).unwrap();
         assert!(desc.contains("width=1280,height=720"), "got {desc}");
+        assert!(desc.contains("block=true max-bytes=11059200"), "got {desc}");
         assert!(desc.contains("framerate=60/1"), "got {desc}");
-        assert!(desc.contains("location=/tmp/out.mp4"), "got {desc}");
+        assert!(desc.contains("location=\"/tmp/out.mp4\""), "got {desc}");
+    }
+
+    #[test]
+    fn quotes_an_output_path_with_spaces() {
+        let out = "/home/me/Videos/SlickShot 2026-09-27 at 23.20.mp4";
+        let desc = pipeline_description(640, 480, 30, "RGBA", out, &["x264enc"]).unwrap();
+        assert!(desc.ends_with(&format!("location=\"{out}\"")), "got {desc}");
+        assert_eq!(parse_quoted(r#"a"b\c"#), r#""a\"b\\c""#);
+    }
+
+    #[test]
+    fn encodes_4_2_0_chroma() {
+        let desc = pipeline_description(1280, 720, 30, "RGBA", "/tmp/out.mp4", &["x264enc"]).unwrap();
+        assert!(desc.contains("format=I420 ! queue ! x264enc"), "got {desc}");
     }
 
     #[test]
@@ -611,11 +791,15 @@ mod tests {
         // `available_encoders` filters ENCODERS, and `pipeline_description`
         // matches on the same names -- a rename in one that missed the other
         // would silently mean "no encoder found" on every machine.
-        for name in ENCODERS {
+        for encoder in &ENCODERS {
+            let desc = pipeline_description(64, 64, 30, "RGBA", "/tmp/a.mp4", &[encoder.name])
+                .unwrap_or_else(|| panic!("{} is looked for but has no pipeline", encoder.name));
             assert!(
-                pipeline_description(64, 64, 30, "/tmp/a.mp4", &[name]).is_some(),
-                "{name} is looked for but has no pipeline"
+                matches!(encoder.format, "I420" | "NV12"),
+                "{} must be fed 4:2:0",
+                encoder.name
             );
+            assert!(desc.contains(encoder.launch), "got {desc}");
         }
     }
 }

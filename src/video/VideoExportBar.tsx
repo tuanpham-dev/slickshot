@@ -4,6 +4,7 @@ import { Copy, Download, FolderOpen, Trash2, Upload } from "lucide-react";
 import { Button } from "../ui/Button";
 import { useToast } from "../ui/Toast";
 import {
+  isMac,
   onVideoExportProgress,
   videoCopyFile,
   videoExport,
@@ -12,6 +13,13 @@ import {
   videoUploadSupported,
   type VideoExportRequest,
 } from "../lib/ipc";
+
+/** What the platform calls its file manager, for the copy toast. */
+const FILE_MANAGER = isMac
+  ? "Finder"
+  : /Windows/.test(navigator.userAgent)
+    ? "File Explorer"
+    : "your file manager";
 
 export interface VideoExportBarProps {
   /** Everything but the destination, which each button supplies. */
@@ -94,7 +102,7 @@ export function VideoExportBar({ request, buildOverlay, onDiscard, onReveal }: V
       toast.show({
         kind: "success",
         title: "Copied",
-        description: "Paste into Finder or a message to attach the recording.",
+        description: `Paste into ${FILE_MANAGER} or a message to attach the recording.`,
       });
     });
 

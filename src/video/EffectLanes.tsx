@@ -132,93 +132,101 @@ export function EffectLanes({
   if (lanes.length === 0) return null;
 
   return (
-    <div ref={attach} className="relative flex flex-col gap-1 px-3 pb-2">
-      {lanes.map((lane, i) => (
-        <div key={i} className="relative h-6">
-          {lane.map((effect) => {
-            const style = STYLE[effect.kind];
-            const left = msToPx(effect.startMs, width, duration);
-            // A freeze has no source span, so it gets a fixed readable width
-            // rather than collapsing to a hairline.
-            const raw =
-              effect.kind === "freeze"
-                ? 56
-                : msToPx(effect.endMs, width, duration) - left;
-            const w = Math.max(36, raw);
-            const selected = effect.id === selectedId;
-            return (
-              <div
-                key={effect.id}
-                className={`absolute top-0 h-6 rounded-[var(--radius-sm)] flex items-center gap-1 px-1.5 text-[10px] font-semibold text-white select-none cursor-grab ${
-                  selected ? "ring-2 ring-white/80" : ""
-                }`}
-                style={{ left, width: w, background: style.bg }}
-                onPointerDown={(e) => {
-                  e.stopPropagation();
-                  onSelect(effect.id);
-                  setDrag({
-                    id: effect.id,
-                    edge: "move",
-                    grabMs: msAt(e.clientX) - effect.startMs,
-                  });
-                }}
-                title={`${effect.kind} · ${style.label(effect)}`}
-              >
-                {style.icon}
-                <span className="truncate">{style.label(effect)}</span>
+    // The same columns as the Timeline row above -- play button, timecode,
+    // track, timecode -- so a clip sits exactly under the stretch of the
+    // filmstrip it covers and the playhead lines up with both.
+    <div className="flex gap-3 px-3 pb-2">
+      <div aria-hidden className="w-9 shrink-0" />
+      <div aria-hidden className="w-12 shrink-0" />
+      <div ref={attach} className="relative flex-1 min-w-0 flex flex-col gap-1">
+        {lanes.map((lane, i) => (
+          <div key={i} className="relative h-6">
+            {lane.map((effect) => {
+              const style = STYLE[effect.kind];
+              const left = msToPx(effect.startMs, width, duration);
+              // A freeze has no source span, so it gets a fixed readable width
+              // rather than collapsing to a hairline.
+              const raw =
+                effect.kind === "freeze"
+                  ? 56
+                  : msToPx(effect.endMs, width, duration) - left;
+              const w = Math.max(36, raw);
+              const selected = effect.id === selectedId;
+              return (
+                <div
+                  key={effect.id}
+                  className={`absolute top-0 h-6 rounded-[var(--radius-sm)] flex items-center gap-1 px-1.5 text-[10px] font-semibold text-white select-none cursor-grab ${
+                    selected ? "ring-2 ring-white/80" : ""
+                  }`}
+                  style={{ left, width: w, background: style.bg }}
+                  onPointerDown={(e) => {
+                    e.stopPropagation();
+                    onSelect(effect.id);
+                    setDrag({
+                      id: effect.id,
+                      edge: "move",
+                      grabMs: msAt(e.clientX) - effect.startMs,
+                    });
+                  }}
+                  title={`${effect.kind} · ${style.label(effect)}`}
+                >
+                  {style.icon}
+                  <span className="truncate">{style.label(effect)}</span>
 
-                {effect.kind !== "freeze" && (
-                  <>
-                    <span
-                      role="slider"
-                      aria-label={`${effect.kind} start`}
-                      aria-valuenow={effect.startMs}
-                      aria-valuemin={0}
-                      aria-valuemax={duration}
-                      tabIndex={0}
-                      className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize bg-white/30 rounded-l-[var(--radius-sm)]"
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        onSelect(effect.id);
-                        setDrag({ id: effect.id, edge: "start", grabMs: 0 });
-                      }}
-                    />
-                    <span
-                      role="slider"
-                      aria-label={`${effect.kind} end`}
-                      aria-valuenow={effect.endMs}
-                      aria-valuemin={0}
-                      aria-valuemax={duration}
-                      tabIndex={0}
-                      className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize bg-white/30 rounded-r-[var(--radius-sm)]"
-                      onPointerDown={(e) => {
-                        e.stopPropagation();
-                        onSelect(effect.id);
-                        setDrag({ id: effect.id, edge: "end", grabMs: 0 });
-                      }}
-                    />
-                  </>
-                )}
+                  {effect.kind !== "freeze" && (
+                    <>
+                      <span
+                        role="slider"
+                        aria-label={`${effect.kind} start`}
+                        aria-valuenow={effect.startMs}
+                        aria-valuemin={0}
+                        aria-valuemax={duration}
+                        tabIndex={0}
+                        className="absolute inset-y-0 left-0 w-1.5 cursor-ew-resize bg-white/30 rounded-l-[var(--radius-sm)]"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          onSelect(effect.id);
+                          setDrag({ id: effect.id, edge: "start", grabMs: 0 });
+                        }}
+                      />
+                      <span
+                        role="slider"
+                        aria-label={`${effect.kind} end`}
+                        aria-valuenow={effect.endMs}
+                        aria-valuemin={0}
+                        aria-valuemax={duration}
+                        tabIndex={0}
+                        className="absolute inset-y-0 right-0 w-1.5 cursor-ew-resize bg-white/30 rounded-r-[var(--radius-sm)]"
+                        onPointerDown={(e) => {
+                          e.stopPropagation();
+                          onSelect(effect.id);
+                          setDrag({ id: effect.id, edge: "end", grabMs: 0 });
+                        }}
+                      />
+                    </>
+                  )}
 
-                {selected && (
-                  <button
-                    type="button"
-                    aria-label={`Remove ${effect.kind}`}
-                    className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-[var(--bg)] text-[var(--fg)] border border-[var(--border)] flex items-center justify-center"
-                    onPointerDown={(e) => e.stopPropagation()}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onRemove(effect.id);
-                    }}
-                  >
-                    <X size={9} />
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      ))}
+                  {selected && (
+                    <button
+                      type="button"
+                      aria-label={`Remove ${effect.kind}`}
+                      className="absolute -top-1.5 -right-1.5 w-4 h-4 rounded-full bg-[var(--bg)] text-[var(--fg)] border border-[var(--border)] flex items-center justify-center"
+                      onPointerDown={(e) => e.stopPropagation()}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onRemove(effect.id);
+                      }}
+                    >
+                      <X size={9} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        ))}
+      </div>
+      <div aria-hidden className="w-12 shrink-0" />
     </div>
   );
 }

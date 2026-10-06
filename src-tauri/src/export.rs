@@ -115,8 +115,10 @@ pub(crate) fn quicksave_file(settings: &crate::settings::Settings) -> std::path:
     dir.join(filename)
 }
 
-/// Where a finished recording is quick-saved: the same folder screenshots go
-/// to, named to be obviously distinct from them in a directory listing.
+/// Where a finished recording is quick-saved: the configured save folder when
+/// there is one, shared with screenshots, otherwise a `Recordings` folder
+/// under the platform's Videos (Movies on macOS) -- a video has no business
+/// in Pictures. Named to be obviously distinct from screenshots in a listing.
 /// Always `.mp4` -- `default_format` is about still images, and a recording
 /// has only one container.
 pub(crate) fn recording_quicksave_file(settings: &crate::settings::Settings) -> std::path::PathBuf {
@@ -125,9 +127,9 @@ pub(crate) fn recording_quicksave_file(settings: &crate::settings::Settings) -> 
         .as_ref()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| {
-            dirs::picture_dir()
+            dirs::video_dir()
                 .unwrap_or_else(|| dirs::home_dir().unwrap_or_default())
-                .join("Screenshots")
+                .join("Recordings")
         });
     dir.join(format!("Recording {}.mp4", filename_timestamp()))
 }
@@ -163,9 +165,21 @@ pub(crate) fn notify_saved(app: &tauri::AppHandle, path: &str) {
     let _ = app
         .notification()
         .builder()
-        .title("Screenshot saved")
+        .title(saved_title(path))
         .body(name)
         .show();
+}
+
+/// The notification title for a saved file: a recording or GIF is not a
+/// screenshot, and saying so on every export reads as a bug.
+fn saved_title(path: &str) -> &'static str {
+    let ext = std::path::Path::new(path)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("mp4" | "mov" | "gif") => "Recording saved",
+        _ => "Screenshot saved",
+    }
 }
 
 /// Tells the user a capture failed. A scrolling capture has no window left to
@@ -297,4 +311,25 @@ fn filename_timestamp() -> String {
     let now = time::OffsetDateTime::now_local().unwrap_or_else(|_| time::OffsetDateTime::now_utc());
     let fmt = format_description!("[year]-[month]-[day] [hour]-[minute]-[second]");
     now.format(&fmt).unwrap_or_else(|_| "untitled".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recordings_are_not_announced_as_screenshots() {
+        assert_eq!(saved_title("/v/Recording 2026-09-27.mp4"), "Recording saved");
+        assert_eq!(saved_title("/v/Recording 2026-09-27.GIF"), "Recording saved");
+        assert_eq!(saved_title("/p/Screenshot 2026-09-27.png"), "Screenshot saved");
+    }
+
+    #[test]
+    fn a_configured_folder_still_takes_recordings() {
+        let settings = crate::settings::Settings {
+            save_dir: Some("/tmp/shots".into()),
+            ..Default::default()
+        };
+        assert!(recording_quicksave_file(&settings).starts_with("/tmp/shots"));
+    }
 }

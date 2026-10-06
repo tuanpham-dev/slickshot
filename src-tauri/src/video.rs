@@ -851,6 +851,51 @@ pub async fn video_thumbnails(
     .map_err(|e| CommandError::Image(e.to_string()))?
 }
 
+/// One frame of the recording at `at_ms`, as raw RGBA behind an 8-byte header
+/// of width then height (little-endian `u32`s).
+///
+/// The editor's fallback for grabbing the frame under the annotations. It
+/// normally draws the `<video>` itself, but WebKitGTK's GL video sink can hand
+/// back a fully transparent bitmap for that -- and every censor, spotlight and
+/// magnifier previews against it. Raw rather than PNG: this runs on each seek,
+/// and encoding a 4K PNG costs more than the decode.
+#[tauri::command]
+pub async fn video_frame(app: AppHandle, id: String, at_ms: u64) -> CommandResult<tauri::ipc::Response> {
+    let path = app
+        .state::<VideoStore>()
+        .get(&id)
+        .ok_or_else(|| CommandError::Image("that recording is no longer open".into()))?;
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let backend = crate::record::default_backend();
+        let mut grabbed = None;
+        backend
+            .decode_frames(
+                &path,
+                TimeRange {
+                    start_ms: at_ms,
+                    end_ms: at_ms + 500,
+                },
+                0,
+                &mut |frame| {
+                    grabbed = Some(frame.image);
+                    false
+                },
+            )
+            .map_err(|e| CommandError::Image(e.to_string()))?;
+        let image = grabbed
+            .ok_or_else(|| CommandError::Image("no frame at that time".into()))?;
+        let (w, h) = image.dimensions();
+        let mut out = Vec::with_capacity(8 + image.as_raw().len());
+        out.extend_from_slice(&w.to_le_bytes());
+        out.extend_from_slice(&h.to_le_bytes());
+        out.extend_from_slice(image.as_raw());
+        Ok(tauri::ipc::Response::new(out))
+    })
+    .await
+    .map_err(|e| CommandError::Image(e.to_string()))?
+}
+
 /// Drops a recording the user chose not to keep, deleting the temp file. Only
 /// files under the app's own recordings directory are removed -- an entry
 /// opened from history or the save folder is the user's, not ours.
